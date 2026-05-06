@@ -115,6 +115,13 @@ typedef enum {
 	SMP_ENC_SIZE,
 	SMP_KEYS_FLAGS,
 
+	/* Per-policy parameter consumed by dc_nesn (CVE-2020-10060/10061).
+	 * 1 = anchor PDU pending after a fresh CONNECT_IND, 0 otherwise.
+	 * The dc_nesn policy reads this alongside NESN/SN; the hook flips it
+	 * to 0 once the first DC PDU has cleared the verifier so subsequent
+	 * NESN=1/SN=1 retransmits are not false-positively dropped. */
+	DC_ANCHOR_STATE,
+
 	// end
 	IFW_DC_PARAM_NUM,
 } IFW_DC_PARAM;

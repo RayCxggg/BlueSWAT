@@ -40,6 +40,8 @@
 #define LOG_MODULE_NAME bt_ctlr_lll_adv
 #include "common/log.h"
 #include <soc.h>
+
+#include "fsm_handle.h"
 #include "hal/debug.h"
 
 static int init_reset(void);
@@ -652,9 +654,21 @@ static inline int isr_rx_pdu(struct lll_adv *lll, u8_t devmatch_ok,
 	    (pdu_rx->len == sizeof(struct pdu_adv_scan_req)) &&
 	    (pdu_adv->type != PDU_ADV_TYPE_DIRECT_IND) &&
 	    isr_rx_sr_check(lll, pdu_adv, pdu_rx, devmatch_ok, &rl_idx)) {
-		radio_isr_set(isr_done, lll);
-		radio_switch_complete_and_disable();
-		radio_pkt_tx_set(lll_adv_scan_rsp_curr_get(lll));
+		struct pdu_adv *scan_rsp_pdu = lll_adv_scan_rsp_curr_get(lll);
+
+		/* BlueSWAT LL TX hook (CVE-2021-3581 et al.).  When the
+		 * verifier rejects the scan response we abort the radio the
+		 * same way the CONNECT_IND-not-ours path does (line 727 below)
+		 * — radio_disable() leaves no half-configured RX→TX→DISABLE
+		 * shorts that could fire with a stale PACKETPTR. */
+		if (IFW_LL_TX_PARSER(scan_rsp_pdu)) {
+			radio_isr_set(isr_abort, lll);
+			radio_disable();
+		} else {
+			radio_isr_set(isr_done, lll);
+			radio_switch_complete_and_disable();
+			radio_pkt_tx_set(scan_rsp_pdu);
+		}
 
 		/* assert if radio packet ptr is not set and radio started tx */
 		LL_ASSERT(!radio_is_ready());
