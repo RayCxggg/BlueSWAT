@@ -656,14 +656,17 @@ static inline int isr_rx_pdu(struct lll_adv *lll, u8_t devmatch_ok,
 	    isr_rx_sr_check(lll, pdu_adv, pdu_rx, devmatch_ok, &rl_idx)) {
 		struct pdu_adv *scan_rsp_pdu = lll_adv_scan_rsp_curr_get(lll);
 
-		radio_isr_set(isr_done, lll);
-		radio_switch_complete_and_disable();
-
-		/* BlueSWAT LL TX hook (CVE-2021-3581 et al.).  Drops the
-		 * scan response if the policy verifier rejects it; the radio
-		 * is already configured to disable on switch-complete, so
-		 * skipping radio_pkt_tx_set() is sufficient. */
-		if (!IFW_LL_TX_PARSER(scan_rsp_pdu)) {
+		/* BlueSWAT LL TX hook (CVE-2021-3581 et al.).  When the
+		 * verifier rejects the scan response we abort the radio the
+		 * same way the CONNECT_IND-not-ours path does (line 727 below)
+		 * — radio_disable() leaves no half-configured RX→TX→DISABLE
+		 * shorts that could fire with a stale PACKETPTR. */
+		if (IFW_LL_TX_PARSER(scan_rsp_pdu)) {
+			radio_isr_set(isr_abort, lll);
+			radio_disable();
+		} else {
+			radio_isr_set(isr_done, lll);
+			radio_switch_complete_and_disable();
 			radio_pkt_tx_set(scan_rsp_pdu);
 		}
 

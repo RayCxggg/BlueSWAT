@@ -21,14 +21,6 @@ static inline void ifw_ctrl_rx(memq_link_t *link, struct node_rx_pdu **rx,
 			       struct pdu_data *pdu_rx, struct ll_conn *conn);
 static inline uint8_t ifw_count_one(uint8_t *octets);
 
-/* LL TX hook (the "1 LL TX hook" the paper refers to).  Invoked from the
- * radio TX staging path with the PDU about to be transmitted; returns
- * IFW_OPERATION_REJECT to drop the PDU before it hits the radio.
- *
- * Currently enforces the SCAN_RSP_LEN policy (CVE-2021-3581) — a single
- * universal LL TX hook is sufficient because every outgoing PDU passes
- * through here on its way to the radio, regardless of which upper-layer
- * API generated it. */
 /* Per-connection counters owned by the LL RX hook.  These mirror values
  * pushed into the FSM via IFW_FSM_CHECK_UPDATE so the policy verifier can
  * read them.
@@ -38,14 +30,22 @@ static inline uint8_t ifw_count_one(uint8_t *octets);
  *   llcp_cpr_pending     — same idea for LL_CONN_PARAM_REQ /
  *                          LL_CONN_PARAM_RSP (CVE-2021-3430).
  *
- * The anchor-point gate that used to live here as a separate static is
- * now expressed in the FSM itself: core_state[LL_STATE] transitions
- * IFW_BLE_LL_CONNECTION_STATE -> IFW_BLE_LL_STANDBY_STATE on the first DC
- * PDU of each connection, and the dc_nesn policy reads that field.
+ * The dc_nesn anchor gate is not stored here.  It lives in the FSM as
+ * dc_param[DC_ANCHOR_STATE] so the eBPF policy can read it directly —
+ * see the IFW_FSM_CHECK_UPDATE calls in ifw_peripheral_setup() (1 =
+ * pending) and ifw_conn_rx() (0 = consumed).
  */
 static int  llcp_len_req_pending;
 static int  llcp_cpr_pending;
 
+/* LL TX hook (the "1 LL TX hook" the paper refers to).  Invoked from the
+ * radio TX staging path with the PDU about to be transmitted; returns
+ * IFW_OPERATION_REJECT to drop the PDU before it hits the radio.
+ *
+ * Currently enforces the SCAN_RSP_LEN policy (CVE-2021-3581) — a single
+ * universal LL TX hook is sufficient because every outgoing PDU passes
+ * through here on its way to the radio, regardless of which upper-layer
+ * API generated it. */
 bool ifw_ll_packet_parser_tx(struct pdu_adv *pdu)
 {
 	if (pdu == NULL) {
