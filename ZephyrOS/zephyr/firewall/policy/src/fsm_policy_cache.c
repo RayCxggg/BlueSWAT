@@ -257,6 +257,127 @@ static uint64_t run_fsm_ebpf_policy(int ebpf_policy_idx, void *newState,
  *  integrate them into BlueSWAT"); a higher-level transport — e.g. a
  * vendor-specific GATT characteristic — calls this once a complete
  * bytecode payload has been received from the peer. */
+/* Maximum instruction count for runtime-installed policies.  The largest
+ * compile-time policy in the tree is ~9 instructions (smp_ident_check);
+ * 64 leaves headroom for richer custom policies without giving an
+ * attacker millions of instructions to burn. */
+#define IFW_RUNTIME_MAX_INSTS 64
+
+/* Lightweight structural verifier for runtime-installed eBPF policies.
+ * Returns 0 on success, a negative diagnostic code on rejection.
+ *
+ * The Linux kernel verifier does full type tracking (~3 KLOC); this is
+ * not that.  It catches the realistic abuse vectors when accepting an
+ * untrusted bytecode payload over the GATT patch service:
+ *
+ *   - infinite loops      → reject any negative jump offset
+ *   - out-of-range PC     → check every jump target is < num_insts
+ *   - foreign helper call → reject EBPF_OP_CALL outright
+ *   - write-anywhere      → reject every ST/STX (policies should be
+ *                            read-only over the FsmState input)
+ *   - OOB FSM read        → bounds-check LDX[BHWDW] against mem_size
+ *   - no return path      → require at least one EXIT
+ *   - corrupt opcode/regs → range-check dst/src
+ *   - LDDW immediate half → skip its second slot so opcode 0 in that
+ *                            slot doesn't trigger "unknown opcode"
+ *
+ * Anything the interpreter handles defensively at runtime (div-by-zero,
+ * unknown opcode → break out) is left to it. */
+static int ifw_verify_policy(const uint8_t *code, uint32_t len, size_t mem_size)
+{
+	if (code == NULL || len == 0 || (len % 8) != 0) {
+		return -10;
+	}
+
+	uint32_t num_insts = len / 8u;
+	if (num_insts > IFW_RUNTIME_MAX_INSTS) {
+		return -11;
+	}
+
+	bool seen_exit = false;
+	const struct ebpf_inst *insts = (const struct ebpf_inst *)code;
+
+	for (uint32_t pc = 0; pc < num_insts; pc++) {
+		const struct ebpf_inst *inst = &insts[pc];
+		uint8_t op = inst->opcode;
+
+		if (inst->dst >= MAX_BPF_REG || inst->src >= MAX_BPF_REG) {
+			return -12;
+		}
+
+		if (op == EBPF_OP_CALL) {
+			return -13;
+		}
+
+		if (op == EBPF_OP_EXIT) {
+			seen_exit = true;
+			continue;
+		}
+
+		/* Stores forbidden — runtime policies are pure readers. */
+		switch (op) {
+		case EBPF_OP_STDW: case EBPF_OP_STW:
+		case EBPF_OP_STH:  case EBPF_OP_STB:
+		case EBPF_OP_STXDW: case EBPF_OP_STXW:
+		case EBPF_OP_STXH:  case EBPF_OP_STXB:
+			return -14;
+		}
+
+		/* Memory loads: only from r1 (input mem ptr) or r10 (stack). */
+		size_t load_sz = 0;
+		switch (op) {
+		case EBPF_OP_LDXDW: load_sz = 8; break;
+		case EBPF_OP_LDXW:  load_sz = 4; break;
+		case EBPF_OP_LDXH:  load_sz = 2; break;
+		case EBPF_OP_LDXB:  load_sz = 1; break;
+		}
+		if (load_sz != 0) {
+			int16_t off = inst->offset;
+			if (inst->src == 1) {
+				if (off < 0 ||
+				    (size_t)off + load_sz > mem_size) {
+					return -15;
+				}
+			} else if (inst->src == 10) {
+				/* r10 is stack frame top; valid offsets are
+				 * in [-STACK_SIZE, 0). */
+				if (off >= 0 ||
+				    (int)load_sz + off > 0 ||
+				    (size_t)(-off) > STACK_SIZE) {
+					return -16;
+				}
+			} else {
+				return -17;
+			}
+		}
+
+		/* LDDW occupies two slots; the second slot's `imm` carries the
+		 * upper 32 bits of the immediate.  Skip it so we don't try to
+		 * decode opcode==0 as a real instruction. */
+		if (op == EBPF_OP_LDDW) {
+			if (pc + 1 >= num_insts) {
+				return -18;
+			}
+			pc++;
+			continue;
+		}
+
+		/* Forward-only jumps. */
+		if ((op & EBPF_CLS_MASK) == EBPF_CLS_JMP) {
+			int16_t off = inst->offset;
+			if (off < 0) {
+				return -19;
+			}
+			uint32_t target = pc + 1u + (uint32_t)off;
+			if (target >= num_insts) {
+				return -20;
+			}
+		}
+	}
+
+	return seen_exit ? 0 : -21;
+}
+
 int ifw_install_policy(int class, int type,
 		       const uint8_t *code, uint32_t len)
 {
@@ -269,6 +390,11 @@ int ifw_install_policy(int class, int type,
 	}
 	if (runtime_policy_count >= IFW_MAX_RUNTIME_POLICIES) {
 		return -3;
+	}
+
+	int verr = ifw_verify_policy(code, len, sizeof(struct FsmState));
+	if (verr != 0) {
+		return verr;
 	}
 
 	uint8_t *copy = (uint8_t *)ebpf_malloc(len);

@@ -455,6 +455,82 @@ int main(void)
 			       dropped, true);
 	}
 
+	/* ----- eBPF verifier rejection cases -----
+	 *
+	 * The GATT patch service feeds untrusted bytecode straight into
+	 * ifw_install_policy().  Without a verifier a malicious peer could
+	 * loop forever, read OOB, or call non-existent helpers.  These
+	 * cases check that the structural verifier rejects each obvious
+	 * abuse pattern.  The benign "always reject" case above already
+	 * proves a well-formed program is accepted. */
+	puts("\nVerifier (rejects abusive runtime patches)");
+	{
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    (const u8_t *)"", 0);
+		printf("  [%s] empty bytecode rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+	{
+		/* Backward jump (loop): JA -1, exit. */
+		static const u8_t backjump[] = {
+			0x05, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+			0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    backjump, sizeof(backjump));
+		printf("  [%s] backward jump rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+	{
+		/* CALL helper #0 — no helpers exposed for runtime patches. */
+		static const u8_t call_inst[] = {
+			0x85, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    call_inst, sizeof(call_inst));
+		printf("  [%s] CALL instruction rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+	{
+		/* Store to memory: STXW [r1+0] = r0. */
+		static const u8_t store_inst[] = {
+			0x63, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    store_inst, sizeof(store_inst));
+		printf("  [%s] store rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+	{
+		/* OOB FSM read: LDXW r0, [r1 + 9999]. */
+		static const u8_t oob_load[] = {
+			0x61, 0x10, 0x0f, 0x27, 0x00, 0x00, 0x00, 0x00,
+			0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    oob_load, sizeof(oob_load));
+		printf("  [%s] OOB load rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+	{
+		/* No EXIT — just one MOV. */
+		static const u8_t no_exit[] = {
+			0xb7, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    no_exit, sizeof(no_exit));
+		printf("  [%s] missing EXIT rejected (rc=%d)\n",
+		       rc != 0 ? "PASS" : "FAIL", rc);
+		total++; if (rc == 0) failures++;
+	}
+
 	/* ----- Summary ----- */
 	puts("\n=======================================");
 	if (failures == 0) {

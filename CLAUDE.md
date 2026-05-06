@@ -30,18 +30,17 @@ on the real ARM toolchain.
 | ARM Cortex-M build confirmed (`west build -b nrf52840_pca10056 peripheral`) | ✅ FLASH 19.56% / SRAM 17.30% — within paper's log.md envelope |
 | Runtime policy install API (`ifw_install_policy`) — paper's OTA-patch capability | ✅ done, host-test passes, ARM-build clean |
 | GATT vendor service for OTA bytecode upload | ✅ done (`peripheral/src/firewall_patch.c`); ARM-build clean, write_commit objdump confirms `bl <ifw_install_policy>` |
+| Structural eBPF verifier in `ifw_install_policy` (instr cap, no back-jumps, no CALL, no stores, bounds-checked LDX, must-EXIT) | ✅ done; 6 rejection cases pass; +288 B FLASH |
 
 ## Open todos
 
-Both options 1 and 2 are now done. Possible next steps if the project continues:
+The C-level capability, the GATT delivery layer, and the verifier are
+all done.  Remaining items if the project continues:
 
 - **Pair an actual board with a BLE central** (e.g. nRF Connect for Mobile, or a
   second Nordic devkit running a sample central) and exercise the full
   patch-upload flow against the GATT service UUIDs in
   `peripheral/src/firewall_patch.c`.
-- **Add a minimal eBPF verifier** (bounds, max-instruction-count, no-loops)
-  before `ifw_install_policy` accepts bytecode — currently a malformed
-  payload could hang the interpreter.
 - **Sign the patches.** Add LE Secure Connections requirement on the GATT
   characteristics + payload signature verification before install.
 - **Mynewt/NimBLE port.** Mirror these changes onto the Mynewt artifact
