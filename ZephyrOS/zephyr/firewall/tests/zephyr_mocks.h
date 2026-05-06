@@ -146,15 +146,24 @@ enum pdu_data_llid {
 };
 
 enum pdu_data_llctrl_type {
+	PDU_DATA_LLCTRL_TYPE_CHAN_MAP_IND = 0x01,
 	PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ = 0x0F,
 	PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP = 0x10,
 	PDU_DATA_LLCTRL_TYPE_LENGTH_REQ = 0x14,
 	PDU_DATA_LLCTRL_TYPE_LENGTH_RSP = 0x15,
 };
 
+struct pdu_data_llctrl_chan_map_ind {
+	u8_t chm[5];
+	u16_t instant;
+} __attribute__((packed));
+
 struct pdu_data_llctrl {
 	u8_t opcode;
-	u8_t payload[64];
+	union {
+		u8_t payload[64];
+		struct pdu_data_llctrl_chan_map_ind chan_map_ind;
+	};
 } __attribute__((packed));
 
 struct pdu_data {

@@ -258,6 +258,25 @@ static inline void ifw_ctrl_rx(memq_link_t *link, struct node_rx_pdu **rx,
 	(void)conn;
 
 	switch (pdu_rx->llctrl.opcode) {
+	case PDU_DATA_LLCTRL_TYPE_CHAN_MAP_IND: {
+		/* CVE-2020-10069 mid-session variant.  The same channel-map
+		 * vulnerability that the CONNECT_IND check covers can be
+		 * triggered after the connection is up by an attacker sending
+		 * an LL_CHANNEL_MAP_IND with too few enabled channels: when
+		 * the instant arrives Zephyr recomputes data_chan_count from
+		 * the new map and lll_chan_sel_1 then divides by zero.  Run
+		 * the conn_chan_map policy on the proposed map. */
+		u8_t new_count = ifw_count_one(
+			&pdu_rx->llctrl.chan_map_ind.chm[0]);
+
+		IFW_FSM_CHECK_UPDATE(new_count, CHANNEL_MAP, CONN);
+		if (IFW_RUN_VERIFIER(CHANNEL_MAP, CONN)) {
+			result = IFW_OPERATION_REJECT;
+			return;
+		}
+		break;
+	}
+
 	case PDU_DATA_LLCTRL_TYPE_LENGTH_REQ:
 		llcp_len_req_pending++;
 		IFW_FSM_CHECK_UPDATE(llcp_len_req_pending, LLCP_LEN_REQ, DC);

@@ -103,6 +103,17 @@ build_dc_pdu_rx(u8_t ll_id, u8_t nesn, u8_t sn, u8_t ctrl_opcode)
 	return rx;
 }
 
+/* Build an LL_CHANNEL_MAP_IND CTRL PDU with a caller-supplied chan_map. */
+static struct node_rx_hdr *
+build_chan_map_ind_rx(u8_t chm[5])
+{
+	struct node_rx_hdr *rx = build_dc_pdu_rx(
+		PDU_DATA_LLID_CTRL, 0, 0, PDU_DATA_LLCTRL_TYPE_CHAN_MAP_IND);
+	struct pdu_data *pdu = (struct pdu_data *)((u8_t *)rx + sizeof(*rx));
+	memcpy(pdu->llctrl.chan_map_ind.chm, chm, 5);
+	return rx;
+}
+
 /* ----- Test driver ----- */
 
 static int failures;
@@ -219,6 +230,43 @@ int main(void)
 			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
 		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
 		ASSERT_VERDICT("malicious: anchor of 2nd connection NESN=1 SN=1",
+			       dropped, true);
+	}
+
+	/* ----- CVE-2020-10069 (post-connection variant) -----
+	 *
+	 * The same channel-map vulnerability as the CONNECT_IND case can be
+	 * triggered mid-session by an attacker who lets a benign CONNECT_IND
+	 * through and then sends an LL_CHANNEL_MAP_IND with an all-zero map.
+	 * Without a hook on CHAN_MAP_IND, only the CONNECT_IND-time check
+	 * runs and the device crashes when the instant arrives. */
+	puts("\nCVE-2020-10069 (post-connection): malicious LL_CHANNEL_MAP_IND");
+	{
+		u8_t good_map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL,
+			build_connect_ind_rx(good_map, 7, 24));
+		/* Pass the anchor PDU so we land in steady-state. */
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+
+		u8_t benign_update[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_chan_map_ind_rx(benign_update));
+		ASSERT_VERDICT("benign: CHAN_MAP_IND with full 37-channel map",
+			       dropped, false);
+	}
+	{
+		u8_t kill_map[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_chan_map_ind_rx(kill_map));
+		ASSERT_VERDICT("malicious: CHAN_MAP_IND with all-zero map (div-by-zero)",
+			       dropped, true);
+	}
+	{
+		u8_t one_chan[5] = {0x01, 0x00, 0x00, 0x00, 0x00};
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_chan_map_ind_rx(one_chan));
+		ASSERT_VERDICT("malicious: CHAN_MAP_IND with 1-channel map",
 			       dropped, true);
 	}
 
