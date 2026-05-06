@@ -1,3 +1,4 @@
+#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -15,32 +16,17 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-pkg.name: apps/bleprph
-pkg.type: app
-pkg.description: Simple BLE peripheral application.
+
+pkg.name: nimble/host/services/firewall
+pkg.description: BlueSWAT firewall patch service - vendor GATT service for OTA eBPF policy upload.
 pkg.author: "Apache Mynewt <dev@mynewt.apache.org>"
-pkg.homepage: "http://mynewt.apache.org/"
 pkg.keywords:
+    - ble
+    - bluetooth
+    - nimble
+    - firewall
+    - blueswat
 
 pkg.deps:
-    - "@apache-mynewt-core/boot/split"
-    - "@mcuboot/boot/bootutil"
-    - "@apache-mynewt-core/kernel/os"
-    - "@apache-mynewt-core/mgmt/imgmgr"
-    - "@apache-mynewt-core/mgmt/smp"
-    - "@apache-mynewt-core/mgmt/smp/transport/ble"
-    - "@apache-mynewt-core/sys/console"
-    - "@apache-mynewt-core/sys/log"
-    - "@apache-mynewt-core/sys/log/modlog"
-    - "@apache-mynewt-core/sys/stats"
-    - "@apache-mynewt-core/sys/sysinit"
-    - "@apache-mynewt-core/sys/id"
     - nimble/host
-    - nimble/host/services/ans
-    - nimble/host/services/dis
-    - nimble/host/services/firewall
-    - nimble/host/services/gap
-    - nimble/host/services/gatt
-    - nimble/host/store/config
-    - nimble/host/util
-    - firewall
+    - firewall/policy

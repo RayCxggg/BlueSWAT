@@ -3,14 +3,24 @@
 
 #include <stdint.h>
 
-// firewall macro
+/* firewall macro */
 #define IFW_OPERATION_PASS 0
 #define IFW_OPERATION_REJECT 1
 
 #define IFW_UPDATE_SUCCESS 2
 #define IFW_UPDATE_ERROR 3
 
-// BlueSWAT FSM state
+/* ---- Common core FSM (shared with the Zephyr port by design) ----
+ *
+ * Two BlueSWAT implementations exist (Zephyr / NimBLE) because the BLE
+ * stacks are different: hooks live at different points in each stack
+ * (both at the link layer) and the security policies they enforce
+ * target stack-specific vulnerabilities. The *core* of the FSM —
+ * roles, link-layer states, IO capabilities, pairing methods, state
+ * classes — is the same on both ports. Per-stack divergence lives in
+ * IFW_CONN_PARAM / IFW_DC_PARAM and the policy registry.
+ */
+
 typedef enum
 {
     IFW_BLE_LL_CONNECTION_STATE = 0,
@@ -21,17 +31,14 @@ typedef enum
     IFW_BLE_LL_SYNCHRONIZATION_STATE,
     IFW_BLE_LL_ISOCHRONOUS_BROADCASTING_STATE,
 
-    // end
     IFW_BLE_LL_STATE_NUM,
 } IFW_FSM_LL_STATE;
 
-// pairing mode actually used
 typedef enum
 {
     IFW_BLE_SSP = 0,
     IFW_BLE_SC,
 
-    // end
     IFW_BLE_PAIRING_MODE_NUM,
 } IFW_FSM_PAIRING_MODE;
 
@@ -42,7 +49,6 @@ typedef enum
     IFW_BLE_NUMERIC_COMPAIRISON,
     IFW_BLE_PASSKEY_ENTRY,
 
-    // end
     IFW_BLE_PAIRING_METHOD_NUM,
 } IFW_FSM_PAIRING_METHOD;
 
@@ -56,7 +62,6 @@ typedef enum
     IFW_BLE_ROLE_SCANNER,
     IFW_BLE_ROLE_ADVERTISER,
 
-    // end
     IFW_BLE_ROLE_NUM,
 } IFW_FSM_BLE_ROLE;
 
@@ -69,11 +74,9 @@ typedef enum
     KEYBOARD_DISPLAY,
     RESERVED,
 
-    // end
     IFW_IO_CAPACITY_NUM,
 } IFW_IO_CAPACITY;
 
-// FSM core state index
 enum ifw_core_state_type
 {
     LL_STATE = 0,
@@ -82,24 +85,27 @@ enum ifw_core_state_type
     BLE_ROLE,
     IO_CAPACITY,
 
-    // end
     IFW_CORE_STATE_NUM,
 };
 
-// FSM shared state index
+/* ---- Mynewt/NimBLE-specific shared / conn / dc parameters ----
+ *
+ * The slot layout below is the Mynewt-side design. It deliberately
+ * differs from the Zephyr port (which has its own DC_PARAM + SHARED
+ * layout for Zephyr-controller-specific CVEs) — see the BlueSWAT paper
+ * and ZephyrOS/zephyr/firewall/include/fsm_core.h. */
+
 typedef enum
 {
+    /* Mynewt stores the 6-byte peer address as 6 consecutive shared-
+     * state slots so per-byte rules can be expressed cleanly. */
     BD_ADDR = 0,
     BONDING = 6,
-
-    // whether peer supports SC
     SC,
 
-    // end
     IFW_SHARED_STATE_NUM,
 } IFW_SHARED_STATE;
 
-// FSM conn parameters
 typedef enum
 {
     CHANNEL_MAP = 0,
@@ -109,11 +115,9 @@ typedef enum
     TX_OPCODE,
     TX_IS_CTRL,
 
-    // end
     IFW_CONN_PARAM_NUM,
 } IFW_CONN_PARAM;
 
-// FSM Data Connection parameters
 typedef enum
 {
     SN = 0,
@@ -122,26 +126,21 @@ typedef enum
     SMP_MAX_ENC_SIZE,
     SMP_MAX_ENC_SIZE_PREV,
 
-    // end
     IFW_DC_PARAM_NUM,
 } IFW_DC_PARAM;
 
-// FSM param of SPI and BLE
 typedef enum
 {
     HCI_EVT_LEN = 0,
     HCI_ACL_LEN,
 
-    // end
     IFW_SPI_PARAM_NUM,
 } IFW_SPI_PARAM;
 
-// FSM param of HCI core
 typedef enum
 {
     HCI_CMD_BUF = 0,
 
-    // end
     IFW_HCI_PARAM_NUM,
 } IFW_HCI_PARAM;
 
@@ -154,34 +153,36 @@ enum ifw_state_class
     SPI,
     HCI,
 
-    // end
     IFW_STATE_CLASS_NUM,
 };
 
-// FSM
+/* FSM state — int slots so eBPF LDXW (4-byte word loads) addresses
+ * the struct correctly. The eBPF VM in `firewall/libebpf/` operates
+ * on this layout; bytecodes for the Mynewt port should be regenerated
+ * via firewall/policy/compile.sh against this struct. */
 struct FsmState
 {
-    uint8_t core_state[IFW_CORE_STATE_NUM];
-    uint8_t shared_state[IFW_SHARED_STATE_NUM];
-    uint8_t conn_param[IFW_CONN_PARAM_NUM];
-    uint8_t dc_param[IFW_DC_PARAM_NUM];
+    int core_state[IFW_CORE_STATE_NUM];
+    int shared_state[IFW_SHARED_STATE_NUM];
+    int conn_param[IFW_CONN_PARAM_NUM];
+    int dc_param[IFW_DC_PARAM_NUM];
 
-    uint8_t spi_param[IFW_SPI_PARAM_NUM];
-    uint8_t hci_param[IFW_HCI_PARAM_NUM];
+    int spi_param[IFW_SPI_PARAM_NUM];
+    int hci_param[IFW_HCI_PARAM_NUM];
 };
 
-// firewall trace hooks
+/* firewall trace hooks */
 uint8_t ifw_fsm_check_update(uint16_t state, uint16_t type, uint16_t class);
 uint8_t ifw_run_verifier(uint16_t type, uint16_t class);
 void ifw_fsm_state_update(uint16_t state, uint16_t type, uint16_t class);
 
 #define IFW_FSM_CHECK_UPDATE(state, type, class) \
-    (ifw_fsm_check_update(state, type, class) == IFW_UPDATE_ERROR)
+    (ifw_fsm_check_update(state, type, class) == IFW_OPERATION_REJECT)
 
 #define IFW_RUN_VERIFIER(type, class) \
-    (ifw_run_verifier(type, class) == IFW_UPDATE_ERROR)
+    (ifw_run_verifier(type, class) == IFW_OPERATION_REJECT)
 
 #define IFW_FSM_STATE_UPDATE(state, type, class) \
     ifw_fsm_state_update(state, type, class)
 
-#endif // FSM_MONITOR_H_
+#endif /* FSM_MONITOR_H_ */

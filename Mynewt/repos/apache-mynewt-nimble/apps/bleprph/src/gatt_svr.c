@@ -159,7 +159,6 @@ static int gatt_svr_chr_ifw_policy_update(uint16_t conn_handle, uint16_t attr_ha
                                           void *arg)
 {
     const ble_uuid_t *uuid;
-    int rand_num;
     int rc;
 
     uuid = ctxt->chr->uuid;

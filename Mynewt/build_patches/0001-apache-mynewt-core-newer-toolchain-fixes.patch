@@ -1,0 +1,49 @@
+diff --git a/encoding/tinycbor/src/cborpretty.c b/encoding/tinycbor/src/cborpretty.c
+index ca81d95..c9f1174 100644
+--- a/encoding/tinycbor/src/cborpretty.c
++++ b/encoding/tinycbor/src/cborpretty.c
+@@ -34,6 +34,11 @@
+ 
+ #include <float.h>
+ #include <inttypes.h>
++#ifndef PRIu64
++/* Newer newlib gates PRIu64 on `__int64_t_defined`, which Mynewt's
++ * embedded build doesn't get; supply the format string directly. */
++#define PRIu64 "llu"
++#endif
+ #include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+diff --git a/encoding/tinycbor/src/cbortojson.c b/encoding/tinycbor/src/cbortojson.c
+index 572d440..c5757ba 100644
+--- a/encoding/tinycbor/src/cbortojson.c
++++ b/encoding/tinycbor/src/cbortojson.c
+@@ -37,6 +37,12 @@
+ 
+ #include <float.h>
+ #include <inttypes.h>
++#ifndef PRIu64
++#define PRIu64 "llu"
++#endif
++#ifndef PRIx64
++#define PRIx64 "llx"
++#endif
+ #include <math.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+diff --git a/hw/mcu/nordic/nrf52xxx/src/hal_timer.c b/hw/mcu/nordic/nrf52xxx/src/hal_timer.c
+index fc6fe83..ccddff5 100644
+--- a/hw/mcu/nordic/nrf52xxx/src/hal_timer.c
++++ b/hw/mcu/nordic/nrf52xxx/src/hal_timer.c
+@@ -908,7 +908,10 @@ hal_timer_stop(struct hal_timer *timer)
+ {
+     uint32_t ctx;
+     int reset_ocmp;
+-    struct hal_timer *entry;
++    /* GCC 13 -Wmaybe-uninitialized false positive: `entry` is only
++     * read when reset_ocmp is set, which only happens after the
++     * TAILQ_FIRST branch assigns it. Initialise to NULL to silence. */
++    struct hal_timer *entry = NULL;
+     struct nrf52_hal_timer *bsptimer;
+ 
+     if (timer == NULL) {

@@ -45,6 +45,7 @@
 
 // BlueSWAT handle
 #include "fsm_handle.h"
+#include "services/firewall/ble_svc_firewall_patch.h"
 
 static int bleprph_gap_event(struct ble_gap_event *event, void *arg);
 
@@ -334,6 +335,12 @@ static int main_fn(int argc, char **argv)
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
     rc = gatt_svr_init();
+    assert(rc == 0);
+
+    /* Register the BlueSWAT firewall patch service so the runtime
+     * install API + structural verifier are linked into the image and
+     * reachable from a connected central. */
+    rc = ble_svc_firewall_patch_init();
     assert(rc == 0);
 
 #if MYNEWT_VAL(BLE_SVC_DIS_FIRMWARE_REVISION_READ_PERM) >= 0

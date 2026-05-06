@@ -5,10 +5,13 @@
 #include "fsm_core.h"
 #include "utils.h"
 
-void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m, struct ble_ll_conn_sm *connsm)
+/* NimBLE LL TX hook on the data-PDU path. Mirrors what's natural for
+ * NimBLE's controller (the Zephyr port hooks at a different point —
+ * see ZephyrOS/zephyr/firewall/core/fsm_ll_pkt_parser.c — and runs a
+ * different set of TX-side policies). */
+void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m,
+                      struct ble_ll_conn_sm *connsm)
 {
-    // MODLOG_DFLT(INFO, "ifw_ll_tx_parser invoked here!\n");
-
     uint8_t llid;
     uint16_t cur_offset;
     uint8_t cur_txlen;
