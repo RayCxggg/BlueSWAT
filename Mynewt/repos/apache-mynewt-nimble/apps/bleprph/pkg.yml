@@ -38,6 +38,7 @@ pkg.deps:
     - nimble/host
     - nimble/host/services/ans
     - nimble/host/services/dis
+    - nimble/host/services/firewall
     - nimble/host/services/gap
     - nimble/host/services/gatt
     - nimble/host/store/config

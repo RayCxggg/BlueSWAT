@@ -88,7 +88,7 @@ and the new GATT service under
 | Structural eBPF verifier (instr cap, no back-jumps, no CALL, no stores, bounds-checked LDX, must-EXIT) — stack-agnostic | ✅ done |
 | GATT vendor service for OTA bytecode upload | ✅ done — `nimble/host/services/firewall/` (same UUID base `bd00****-7e57-49a1-a0bd-e6cf8d00f1ed` as the Zephyr peer so a single client can drive either port) |
 | Pre-existing compile-blocking bugs fixed (`utils.h` orphan `#else`, `fsm_handle.h` missing semicolon, `fsm_update_handle.c` macro misuse) | ✅ done |
-| `newt build` verified | ⏳ blocked — Mynewt toolchain + apache-mynewt-core submodule not available in this env |
+| `newt build peripheral` verified | ✅ done — text 150576 / data 3008 / bss 17532 bytes; `firewall_patch_access` objdump shows `bl <ifw_install_policy>` |
 
 Things deliberately **not** ported from the Zephyr side:
 - Zephyr-only policies (`conn_chan_hop`, `lll_interval`, `dc_nesn`,
@@ -127,6 +127,28 @@ export ZEPHYR_TOOLCHAIN_VARIANT=gnuarmemb
 export GNUARMEMB_TOOLCHAIN_PATH=/usr
 cd ZephyrOS && rm -rf build && west build -b nrf52840_pca10056 peripheral
 # artifact: ZephyrOS/build/zephyr/zephyr.{elf,hex,bin}
+
+# Mynewt host-side firewall infrastructure tests (no `newt` needed):
+cd Mynewt/repos/apache-mynewt-nimble/firewall/tests
+make run
+# expect: ALL 14 MYNEWT INFRASTRUCTURE TESTS PASSED
+
+# Mynewt nrf52840 firmware build (one-time setup):
+apt-get install -y gcc-arm-none-eabi
+git clone --depth 1 https://github.com/apache/mynewt-newt.git /tmp/mynewt-newt
+go build -C /tmp/mynewt-newt -o /usr/local/bin/newt ./newt
+git submodule update --init --depth 1 \
+    Mynewt/repos/apache-mynewt-core \
+    Mynewt/repos/apache-mynewt-mcumgr \
+    Mynewt/repos/mbedtls \
+    Mynewt/repos/mcuboot \
+    Mynewt/repos/nordic-nrfx
+# Apply pre-existing upstream toolchain fixes:
+(cd Mynewt/repos/apache-mynewt-core && \
+    git apply ../../build_patches/0001-apache-mynewt-core-newer-toolchain-fixes.patch)
+# (See Mynewt/build_patches/README.md for what the patch does.)
+cd Mynewt && newt build peripheral
+# artifact: Mynewt/bin/targets/peripheral/app/@apache-mynewt-nimble/apps/bleprph/bleprph.elf
 ```
 
 ## Key files and where to look
