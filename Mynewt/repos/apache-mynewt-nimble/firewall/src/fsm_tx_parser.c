@@ -4,9 +4,13 @@
 #include "fsm_lib_hdr.h"
 #include "fsm_core.h"
 #include "utils.h"
-#include "controller/ble_ll.h"
 
-void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m, struct ble_ll_conn_sm *connsm)
+/* NimBLE LL TX hook on the data-PDU path. Mirrors what's natural for
+ * NimBLE's controller (the Zephyr port hooks at a different point —
+ * see ZephyrOS/zephyr/firewall/core/fsm_ll_pkt_parser.c — and runs a
+ * different set of TX-side policies). */
+void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m,
+                      struct ble_ll_conn_sm *connsm)
 {
     uint8_t llid;
     uint16_t cur_offset;
@@ -50,27 +54,4 @@ void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m, struct bl
     }
 
     return;
-}
-
-/* LL TX hook for advertising-channel PDUs (the "1 LL TX hook" the paper
- * refers to, on the adv-role side). Mirror of the Zephyr port's
- * ifw_ll_packet_parser_tx. Currently enforces CVE-2021-3581
- * (SCAN_RSP_LEN); other adv types fall through. The adv role state
- * machine in ble_ll_adv.c should call this just before staging the PDU
- * to the radio, returning IFW_OPERATION_REJECT to drop it. */
-bool ifw_ll_adv_tx_parser(uint8_t adv_type, uint8_t pdu_len)
-{
-    switch (adv_type) {
-    case BLE_ADV_PDU_TYPE_SCAN_RSP:
-        if (IFW_FSM_CHECK_UPDATE(pdu_len, SCAN_RSP_LEN, CONN)) {
-            MODLOG_DFLT(INFO, "Malicious scan response dropped at LL TX.\n");
-            return IFW_OPERATION_REJECT;
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    return IFW_OPERATION_PASS;
 }

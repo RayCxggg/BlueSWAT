@@ -20,7 +20,6 @@ bool ifw_dc_ll_ctrl_parser(struct ble_ll_conn_sm *connsm, struct os_mbuf *rxpdu)
 bool ifw_dc_l2cap_parser(struct os_mbuf *rxpdu);
 bool ifw_smp_parser(void *chan);
 void ifw_ll_tx_parser(struct ble_mbuf_hdr *ble_hdr, struct os_mbuf *m, struct ble_ll_conn_sm *connsm);
-bool ifw_ll_adv_tx_parser(uint8_t adv_type, uint8_t pdu_len);
 
 #define IFW_ADV_LL_PARSER(ptype, rxbuf, hdr) \
     (ifw_adv_ll_parser(ptype, rxbuf, hdr) == IFW_VERIFICATION_REJECT)
@@ -35,8 +34,5 @@ bool ifw_ll_adv_tx_parser(uint8_t adv_type, uint8_t pdu_len);
     (ifw_smp_parser(chan) == IFW_VERIFICATION_REJECT)
 
 #define IFW_LL_TX_PARSER(ble_hdr, m, connsm) ifw_ll_tx_parser(ble_hdr, m, connsm)
-
-#define IFW_LL_ADV_TX_PARSER(adv_type, pdu_len) \
-    (ifw_ll_adv_tx_parser(adv_type, pdu_len) == IFW_VERIFICATION_REJECT)
 
 #endif /* FSM_HANDLE_H */

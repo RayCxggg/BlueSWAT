@@ -1,4 +1,10 @@
-/* load FSM policy eBPF code from cache */
+/* Mynewt/NimBLE FSM policy cache.
+ *
+ * Stack-specific policies for the NimBLE port. The Zephyr port has
+ * its own (different) policy set; the only thing the two share by
+ * design is the core FSM model (see fsm_core.h) and the
+ * stack-agnostic runtime-install path below. */
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,17 +21,8 @@
 #include "utils.h"
 #include "fsm_lib_hdr.h"
 
-/* Compile-time policy bytecodes — full Zephyr-aligned set. Legacy
- * keysize_confusion / key_entropy_downgrade kept available for the
- * legacy SMP parser path but not auto-registered. */
+/* NimBLE-side compile-time policies. */
 #include "conn_chan_map.h"
-#include "conn_chan_hop.h"
-#include "lll_interval.h"
-#include "dc_nesn.h"
-#include "llcp_len_req.h"
-#include "llcp_conn_param_req.h"
-#include "scan_rsp_len.h"
-#include "smp_ident_check.h"
 #include "keysize_confusion.h"
 #include "key_entropy_downgrade.h"
 
@@ -68,19 +65,15 @@ static struct policy_cache *get_policy_slot(int pid)
         register_policy(class, type, pid);                  \
     } while (0)
 
-void load_all_policies()
+void load_all_policies(void)
 {
-    /* Full Zephyr-aligned set. The split-SoC SPI HCI policies
-     * (CVE-2020-10065) are deliberately not registered on this
-     * single-chip target — bytecodes remain in the tree. */
+    /* NimBLE-side policies. The bytecodes shipped in
+     * specification/include/ should be regenerated against this port's
+     * struct FsmState (firewall/include/fsm_core.h) using
+     * firewall/policy/compile.sh whenever the layout changes. */
     ADD_POLICY(conn_chan_map,        CONN, CHANNEL_MAP);
-    ADD_POLICY(conn_chan_hop,        CONN, CHANNEL_HOP);
-    ADD_POLICY(lll_interval,         CONN, LLL_INTERVAL);
-    ADD_POLICY(dc_nesn,              DC,   NESN);
-    ADD_POLICY(llcp_len_req,         DC,   LLCP_LEN_REQ);
-    ADD_POLICY(llcp_conn_param_req,  DC,   LLCP_CONN_PARAM_REQ);
-    ADD_POLICY(scan_rsp_len,         CONN, SCAN_RSP_LEN);
-    ADD_POLICY(smp_ident_check,      DC,   SMP_KEYS);
+    ADD_POLICY(keysize_confusion,    DC,   SMP_MAX_ENC_SIZE);
+    ADD_POLICY(key_entropy_downgrade, DC,  SMP_MAX_ENC_SIZE);
 }
 
 void set_policy_jit_on(int pid)
@@ -90,7 +83,7 @@ void set_policy_jit_on(int pid)
     }
 }
 
-void set_all_policy_jit_on()
+void set_all_policy_jit_on(void)
 {
     for (int pid = 0; pid < PID_NUM; pid++) {
         policy_arr[pid].jit = true;
@@ -106,7 +99,7 @@ void ifw_fsm_enable(bool jit)
     }
 }
 
-static void init_policy_manager()
+static void init_policy_manager(void)
 {
     memset(&policy_manager, 0, sizeof(policy_manager));
     policy_mgr_init = true;
@@ -137,8 +130,7 @@ void register_policy(int class, int type, int pid)
         new_policy->policy_next = NULL;
         policy_manager.policy[class][type] = new_policy;
     } else {
-        struct fsm_policy_list *policy =
-            policy_manager.policy[class][type];
+        struct fsm_policy_list *policy = policy_manager.policy[class][type];
 
         while (policy->policy_next != NULL) {
             policy = policy->policy_next;
@@ -243,26 +235,14 @@ static uint64_t run_fsm_ebpf_policy(int ebpf_policy_idx, void *newState,
     return ebpf_vm_exec(vm, newState, dsize);
 }
 
-/* Maximum instruction count for runtime-installed policies. The largest
- * compile-time policy is ~9 instructions (smp_ident_check); 64 leaves
- * headroom for richer custom policies without giving an attacker
- * millions of instructions to burn. */
+/* ---- Stack-agnostic runtime-install path ----
+ *
+ * Same wire-level capability the Zephyr port exposes; identical return
+ * codes. The structural verifier rejects untrusted bytecode that would
+ * otherwise abuse the eBPF VM. */
+
 #define IFW_RUNTIME_MAX_INSTS 64
 
-/* Lightweight structural verifier for runtime-installed eBPF policies.
- * Returns 0 on success, a negative diagnostic code on rejection.
- *
- * Catches the realistic abuse vectors when accepting an untrusted
- * bytecode payload over the GATT patch service:
- *   -10..-11 length / instruction-count caps
- *   -12      register out of range
- *   -13      foreign helper CALL
- *   -14      any store op (policies are pure readers)
- *   -15..-17 OOB/out-of-stack memory load
- *   -18      LDDW missing second slot
- *   -19..-20 negative or out-of-range jump
- *   -21      no EXIT in program
- */
 static int ifw_verify_policy(const uint8_t *code, uint32_t len, size_t mem_size)
 {
     if (code == NULL || len == 0 || (len % 8) != 0) {
@@ -354,7 +334,7 @@ int ifw_install_policy(int class, int type,
                        const uint8_t *code, uint32_t len)
 {
     if (code == NULL || len == 0 || (len % 8) != 0) {
-        return -1; /* eBPF instructions are 8 bytes each */
+        return -1;
     }
     if (class < 0 || class >= IFW_STATE_CLASS_NUM ||
         type  < 0 || type  >= IFW_DC_PARAM_NUM) {
@@ -389,12 +369,6 @@ int ifw_install_policy(int class, int type,
 
 int run_fsm_check_policy(int type, int class, void *newState)
 {
-    /* Note: the early-out on the *_policy_mask bits is intentionally
-     * NOT used here (matches the Zephyr port). The mask flags can race
-     * with register_policy when a runtime install adds a new (class,
-     * type) slot; the linked-list walk below always sees the up-to-date
-     * head pointer. */
-
     struct fsm_policy_list *policy = policy_manager.policy[class][type];
 
     while (policy != NULL) {

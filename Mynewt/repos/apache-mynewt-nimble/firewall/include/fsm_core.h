@@ -10,7 +10,17 @@
 #define IFW_UPDATE_SUCCESS 2
 #define IFW_UPDATE_ERROR 3
 
-/* BlueSWAT FSM state */
+/* ---- Common core FSM (shared with the Zephyr port by design) ----
+ *
+ * Two BlueSWAT implementations exist (Zephyr / NimBLE) because the BLE
+ * stacks are different: hooks live at different points in each stack
+ * (both at the link layer) and the security policies they enforce
+ * target stack-specific vulnerabilities. The *core* of the FSM —
+ * roles, link-layer states, IO capabilities, pairing methods, state
+ * classes — is the same on both ports. Per-stack divergence lives in
+ * IFW_CONN_PARAM / IFW_DC_PARAM and the policy registry.
+ */
+
 typedef enum
 {
     IFW_BLE_LL_CONNECTION_STATE = 0,
@@ -21,17 +31,14 @@ typedef enum
     IFW_BLE_LL_SYNCHRONIZATION_STATE,
     IFW_BLE_LL_ISOCHRONOUS_BROADCASTING_STATE,
 
-    /* end */
     IFW_BLE_LL_STATE_NUM,
 } IFW_FSM_LL_STATE;
 
-/* pairing mode actually used */
 typedef enum
 {
     IFW_BLE_SSP = 0,
     IFW_BLE_SC,
 
-    /* end */
     IFW_BLE_PAIRING_MODE_NUM,
 } IFW_FSM_PAIRING_MODE;
 
@@ -42,7 +49,6 @@ typedef enum
     IFW_BLE_NUMERIC_COMPAIRISON,
     IFW_BLE_PASSKEY_ENTRY,
 
-    /* end */
     IFW_BLE_PAIRING_METHOD_NUM,
 } IFW_FSM_PAIRING_METHOD;
 
@@ -56,7 +62,6 @@ typedef enum
     IFW_BLE_ROLE_SCANNER,
     IFW_BLE_ROLE_ADVERTISER,
 
-    /* end */
     IFW_BLE_ROLE_NUM,
 } IFW_FSM_BLE_ROLE;
 
@@ -69,11 +74,9 @@ typedef enum
     KEYBOARD_DISPLAY,
     RESERVED,
 
-    /* end */
     IFW_IO_CAPACITY_NUM,
 } IFW_IO_CAPACITY;
 
-/* FSM core state index */
 enum ifw_core_state_type
 {
     LL_STATE = 0,
@@ -82,91 +85,62 @@ enum ifw_core_state_type
     BLE_ROLE,
     IO_CAPACITY,
 
-    /* end */
     IFW_CORE_STATE_NUM,
 };
 
-/* FSM shared state index — layout matches Zephyr port so that compiled
- * eBPF bytecodes (which reference fixed struct offsets) are portable.
- * BD_ADDR occupies a single int slot (was 6 bytes in the legacy Mynewt
- * port); the LL parser now folds the address into a single 32-bit hash. */
+/* ---- Mynewt/NimBLE-specific shared / conn / dc parameters ----
+ *
+ * The slot layout below is the Mynewt-side design. It deliberately
+ * differs from the Zephyr port (which has its own DC_PARAM + SHARED
+ * layout for Zephyr-controller-specific CVEs) — see the BlueSWAT paper
+ * and ZephyrOS/zephyr/firewall/include/fsm_core.h. */
+
 typedef enum
 {
+    /* Mynewt stores the 6-byte peer address as 6 consecutive shared-
+     * state slots so per-byte rules can be expressed cleanly. */
     BD_ADDR = 0,
-    BONDING,
+    BONDING = 6,
     SC,
 
-    /* end */
     IFW_SHARED_STATE_NUM,
 } IFW_SHARED_STATE;
 
-/* FSM conn parameters */
 typedef enum
 {
     CHANNEL_MAP = 0,
     CHANNEL_HOP,
     SCAN_RSP_LEN,
     LLL_INTERVAL,
-
-    /* Mynewt-specific TX bookkeeping (slots used by fsm_tx_parser only,
-     * not referenced by any ported Zephyr bytecode). Keep AFTER the
-     * Zephyr-aligned slots so existing bytecode offsets stay valid. */
     TX_OPCODE,
     TX_IS_CTRL,
 
-    /* end */
     IFW_CONN_PARAM_NUM,
 } IFW_CONN_PARAM;
 
-/* FSM Data Connection parameters */
 typedef enum
 {
     SN = 0,
     NESN,
 
-    LLCP_LEN_REQ,
-    LLCP_LEN_ACK,
-    LLCP_LEN_RSP_TX,
-    LLCP_LEN_STATE,
-
-    LLCP_CONN_PARAM_REQ,
-    LLCP_CONN_PARAM_ACK,
-    LLCP_CONN_PARAM_STATE,
-
-    SMP_ENC_SIZE_PREV,
-    SMP_METHOD_PREV,
-    SMP_KEYS,
-    SMP_ENC_SIZE,
-    SMP_KEYS_FLAGS,
-
-    /* Per-policy parameter consumed by dc_nesn (CVE-2020-10060/10061).
-     * 1 = anchor PDU pending after a fresh CONNECT_IND, 0 otherwise. */
-    DC_ANCHOR_STATE,
-
-    /* Mynewt-specific compat slots used by the legacy SMP parser. */
     SMP_MAX_ENC_SIZE,
     SMP_MAX_ENC_SIZE_PREV,
 
-    /* end */
     IFW_DC_PARAM_NUM,
 } IFW_DC_PARAM;
 
-/* FSM param of SPI and BLE */
 typedef enum
 {
     HCI_EVT_LEN = 0,
     HCI_ACL_LEN,
 
-    /* end */
     IFW_SPI_PARAM_NUM,
 } IFW_SPI_PARAM;
 
-/* FSM param of HCI core */
 typedef enum
 {
     HCI_CMD_BUF = 0,
 
-    /* end */
     IFW_HCI_PARAM_NUM,
 } IFW_HCI_PARAM;
 
@@ -179,14 +153,13 @@ enum ifw_state_class
     SPI,
     HCI,
 
-    /* end */
     IFW_STATE_CLASS_NUM,
 };
 
-/* FSM — int slots so the struct layout matches the Zephyr port byte for
- * byte (modulo IFW_*_NUM tail extensions). The compiled eBPF bytecodes
- * load 4-byte words at these offsets; switching from uint8_t (legacy)
- * to int is what makes the ported bytecodes correct. */
+/* FSM state — int slots so eBPF LDXW (4-byte word loads) addresses
+ * the struct correctly. The eBPF VM in `firewall/libebpf/` operates
+ * on this layout; bytecodes for the Mynewt port should be regenerated
+ * via firewall/policy/compile.sh against this struct. */
 struct FsmState
 {
     int core_state[IFW_CORE_STATE_NUM];

@@ -5,32 +5,17 @@
 #include <stdbool.h>
 #include "fsm_core.h"
 
-/* Policy ids — aligned with the Zephyr port. The legacy Mynewt-only
- * keysize_confusion / key_entropy_downgrade pids are kept at the tail
- * for backwards compatibility with the existing specification/ tree. */
+/* Mynewt/NimBLE policy ids.
+ *
+ * BlueSWAT ships as two separate per-stack ports because the BLE
+ * stacks differ: vulnerabilities are stack-specific, hooks attach at
+ * different code points (both at the link layer), and each port
+ * carries its own policy set. The Zephyr port's policy set lives in
+ * ZephyrOS/zephyr/firewall/policy/include/fsm_policy_cache.h and is
+ * intentionally independent of this list. */
 enum fsm_policy_tag
 {
-    /* LL RX policies (CONNECT_IND inspection). */
-    PID_conn_chan_map,        /* CVE-2020-10069 */
-    PID_conn_chan_hop,        /* spec-compliance: hop in [5,16]   */
-    PID_lll_interval,         /* CVE-2021-3432                    */
-
-    /* LL RX policies (DC PDU inspection). */
-    PID_dc_nesn,              /* CVE-2020-10060/10061             */
-    PID_llcp_len_req,         /* CVE-2020-10068                   */
-    PID_llcp_conn_param_req,  /* CVE-2021-3430                    */
-
-    /* LL TX policy. */
-    PID_scan_rsp_len,         /* CVE-2021-3581                    */
-
-    /* SMP host hook. */
-    PID_smp_ident_check,
-
-    /* SPI HCI policies (CVE-2020-10065) — bytecodes carried in the
-     * tree but unregistered on the single-chip nrf52840 target. */
-
-    /* Legacy Mynewt-only policies retained for compatibility with the
-     * pre-existing legacy SMP parser path. Not registered by default. */
+    PID_conn_chan_map,
     PID_keysize_confusion,
     PID_key_entropy_downgrade,
 
@@ -65,17 +50,21 @@ struct policy_cache
 
 /* Maximum number of runtime-installed policies. Pids in
  * [PID_NUM, PID_NUM + IFW_MAX_RUNTIME_POLICIES) index into a separate
- * array so the compile-time policy_arr is left untouched. */
+ * runtime array so the compile-time policy_arr is left untouched. */
 #define IFW_MAX_RUNTIME_POLICIES 8
 
-void load_all_policies();
+void load_all_policies(void);
 void set_policy_jit_on(int pid);
-void set_all_policy_jit_on();
+void set_all_policy_jit_on(void);
 
 /* Install a new eBPF policy at runtime. The bytecode is structurally
  * verified, copied (caller may free its buffer immediately) and
  * registered for (class, type) so that the next IFW_RUN_VERIFIER on
- * that slot picks it up. Returns 0 on success, negative on failure. */
+ * that slot picks it up. Returns 0 on success, negative on failure.
+ *
+ * This is the stack-agnostic "transmit eBPF programs to victims via
+ * BLE" capability — it is shared in design with the Zephyr port but
+ * lives in this Mynewt-only translation unit. */
 int ifw_install_policy(int class, int type,
                        const uint8_t *code, uint32_t len);
 
