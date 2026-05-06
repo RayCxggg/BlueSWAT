@@ -58,9 +58,30 @@ struct policy_cache {
 	bool jit;
 };
 
+/* Maximum number of policies that can be installed at runtime via
+ * ifw_install_policy().  These live in a separate array indexed by pids
+ * starting at PID_NUM, so the compile-time set in policy_arr[] is left
+ * untouched.  The number is small because (a) BLE memory budgets are
+ * tight and (b) the paper's deployment model is "one patch per CVE" —
+ * a handful of runtime patches per device is the realistic ceiling. */
+#define IFW_MAX_RUNTIME_POLICIES 8
+
 void load_all_policies();
 void set_policy_jit_on(int pid);
 void set_all_policy_jit_on();
+
+/* Install a new policy at runtime — the C-level capability that backs the
+ * paper's "transmit eBPF programs to victims via BLE" claim.  The bytecode
+ * is copied (so the caller can free its buffer immediately) and registered
+ * for (class, type) so that subsequent IFW_RUN_VERIFIER calls reach it.
+ *
+ * Returns 0 on success, negative on failure (no slots, OOM, bad args).
+ *
+ * The newly installed policy is *appended* to any existing policies on the
+ * same (class, type) slot — both the compile-time and the runtime ones run
+ * for that slot, and a REJECT from any one drops the packet. */
+int ifw_install_policy(int class, int type,
+		       const uint8_t *code, uint32_t len);
 
 int run_fsm_check_policy(int type, int class, void *newState);
 

@@ -404,6 +404,57 @@ int main(void)
 	 * state is host-only. Tested in isolation via the bytecode-level
 	 * harness (host_runner). */
 
+	/* ----- Runtime policy install (paper's OTA-patch capability) -----
+	 *
+	 * The paper sells eBPF as the way to deploy security patches without
+	 * a firmware reflash:
+	 *   "Vendors can transmit eBPF programs to victims via BLE and
+	 *    directly integrate them into BlueSWAT. … It avoids device reboot
+	 *    and firmware recompilation when installing new patches."
+	 *
+	 * The C-level capability for that is ifw_install_policy().  Here we
+	 * verify it works end-to-end against the real verifier:
+	 *
+	 *   1. A benign CONNECT_IND with role=peripheral passes today (no
+	 *      policy is registered for the (CORE, BLE_ROLE) slot).
+	 *   2. We hand-craft a 16-byte "always reject" eBPF program
+	 *      (mov r0,1 ; exit) and install it on (CORE, BLE_ROLE).
+	 *   3. The same benign CONNECT_IND now drops because the runtime-
+	 *      installed policy fires from inside ifw_conn_setup ->
+	 *      IFW_RUN_VERIFIER(BLE_ROLE, CORE).
+	 *
+	 * This test must run last because the installed policy persists for
+	 * the rest of the process lifetime — there is no uninstall API. */
+	puts("\nRuntime policy install (paper's OTA-patch capability)");
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_connect_ind_rx(map, 7, 24));
+		ASSERT_VERDICT("baseline: benign CONNECT_IND passes",
+			       dropped, false);
+	}
+	{
+		/* eBPF: r0 = 1 (REJECT); exit. */
+		static const uint8_t reject_all_bytecode[] = {
+			0xb7, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		};
+		int rc = ifw_install_policy(CORE, BLE_ROLE,
+					    reject_all_bytecode,
+					    sizeof(reject_all_bytecode));
+		printf("  [%s] ifw_install_policy(CORE, BLE_ROLE, ...) rc=%d\n",
+		       rc == 0 ? "PASS" : "FAIL", rc);
+		total++;
+		if (rc != 0) failures++;
+	}
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_connect_ind_rx(map, 7, 24));
+		ASSERT_VERDICT("hot-loaded policy rejects same CONNECT_IND",
+			       dropped, true);
+	}
+
 	/* ----- Summary ----- */
 	puts("\n=======================================");
 	if (failures == 0) {

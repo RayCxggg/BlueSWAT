@@ -34,6 +34,27 @@ struct fsm_policy_manager policy_manager = { 0 };
 
 struct policy_cache policy_arr[PID_NUM] = { 0 };
 
+/* Runtime-installed policy slots.  Pids in [PID_NUM, PID_NUM +
+ * IFW_MAX_RUNTIME_POLICIES) index into this array.  See get_policy_slot()
+ * for the dispatch. */
+static struct policy_cache runtime_policy_arr[IFW_MAX_RUNTIME_POLICIES] = { 0 };
+static int runtime_policy_count;
+
+static struct policy_cache *get_policy_slot(int pid)
+{
+	if (pid < 0) {
+		return NULL;
+	}
+	if (pid < PID_NUM) {
+		return &policy_arr[pid];
+	}
+	int rt_idx = pid - PID_NUM;
+	if (rt_idx >= IFW_MAX_RUNTIME_POLICIES) {
+		return NULL;
+	}
+	return &runtime_policy_arr[rt_idx];
+}
+
 // pid: policy id
 #define ADD_POLICY(policy_index, class, type)                                  \
 	do {                                                                   \
@@ -183,16 +204,14 @@ static ebpf_vm *get_default_vm(bool use_jit)
 
 static struct ebpf_vm *load_ebpf_code(int ebpf_idx, bool use_jit)
 {
-	if (policy_arr[ebpf_idx].size == 0) {
+	struct policy_cache *slot = get_policy_slot(ebpf_idx);
+	if (slot == NULL || slot->size == 0) {
 		return NULL;
 	}
 
 	ebpf_vm *vm = get_default_vm(use_jit);
 
-	int ebpf_sz = policy_arr[ebpf_idx].size;
-	uint8_t *ebpf_inst = policy_arr[ebpf_idx].code;
-
-	ebpf_vm_set_inst(vm, ebpf_inst, ebpf_sz);
+	ebpf_vm_set_inst(vm, slot->code, slot->size);
 
 	if (use_jit) {
 		gen_jit_code(vm);
@@ -203,12 +222,12 @@ static struct ebpf_vm *load_ebpf_code(int ebpf_idx, bool use_jit)
 
 static ebpf_vm *get_vm_from_cache(int ebpf_idx)
 {
-	if (policy_arr[ebpf_idx].size == 0) {
+	struct policy_cache *slot = get_policy_slot(ebpf_idx);
+	if (slot == NULL || slot->size == 0) {
 		return NULL;
 	}
 
-	bool use_jit = policy_arr[ebpf_idx].jit;
-	return load_ebpf_code(ebpf_idx, use_jit);
+	return load_ebpf_code(ebpf_idx, slot->jit);
 }
 
 static uint64_t run_fsm_ebpf_policy(int ebpf_policy_idx, void *newState,
@@ -226,6 +245,48 @@ static uint64_t run_fsm_ebpf_policy(int ebpf_policy_idx, void *newState,
 
 	// VM interpretion
 	return ebpf_vm_exec(vm, newState, dsize);
+}
+
+/* Install a new eBPF policy at runtime.  See fsm_policy_cache.h for the
+ * contract.  The bytecode is copied via ebpf_malloc (k_malloc on Zephyr)
+ * and the runtime slot is registered for (class, type) so that the next
+ * IFW_RUN_VERIFIER for that slot picks it up.
+ *
+ * This is the C-level capability the paper relies on for OTA patching
+ * ("vendors can transmit eBPF programs to victims via BLE and directly
+ *  integrate them into BlueSWAT"); a higher-level transport — e.g. a
+ * vendor-specific GATT characteristic — calls this once a complete
+ * bytecode payload has been received from the peer. */
+int ifw_install_policy(int class, int type,
+		       const uint8_t *code, uint32_t len)
+{
+	if (code == NULL || len == 0 || (len % 8) != 0) {
+		return -1; /* eBPF instructions are 8 bytes each */
+	}
+	if (class < 0 || class >= IFW_STATE_CLASS_NUM ||
+	    type  < 0 || type  >= IFW_DC_PARAM_NUM) {
+		return -2;
+	}
+	if (runtime_policy_count >= IFW_MAX_RUNTIME_POLICIES) {
+		return -3;
+	}
+
+	uint8_t *copy = (uint8_t *)ebpf_malloc(len);
+	if (copy == NULL) {
+		return -4;
+	}
+	memcpy(copy, code, len);
+
+	int rt_idx = runtime_policy_count;
+	int pid    = PID_NUM + rt_idx;
+
+	runtime_policy_arr[rt_idx].size = (int)len;
+	runtime_policy_arr[rt_idx].code = copy;
+	runtime_policy_arr[rt_idx].jit  = false;
+	runtime_policy_count++;
+
+	register_policy(class, type, pid);
+	return 0;
 }
 
 // FSM policy cache entrance
