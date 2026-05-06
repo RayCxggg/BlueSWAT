@@ -182,34 +182,28 @@ int main(void)
 	POLICY_RUN(lll_interval, "malicious: interval=0", &s, IFW_OPERATION_REJECT);
 
 	/* ----- llcp_len_req (CVE-2020-10068) -----
-	 * Policy: complicated DLE state-machine guard. Benign: req==ack && rsp_tx>0. */
+	 * Policy: reject when more than one LL_LENGTH_REQ is in flight.
+	 * The LL RX hook tracks the in-flight count in dc_param[LLCP_LEN_REQ]. */
 	puts("llcp_len_req (CVE-2020-10068)");
 	memset(&s, 0, sizeof(s));
-	s.dc_param[LLCP_LEN_REQ] = 1; s.dc_param[LLCP_LEN_ACK] = 1;
-	s.dc_param[LLCP_LEN_RSP_TX] = 1; s.dc_param[LLCP_LEN_STATE] = 0;
-	POLICY_RUN(llcp_len_req, "benign: req==ack && rsp_tx",
-		   &s, IFW_OPERATION_PASS);
+	s.dc_param[LLCP_LEN_REQ] = 1;
+	POLICY_RUN(llcp_len_req, "benign: 1 in-flight req", &s, IFW_OPERATION_PASS);
 	memset(&s, 0, sizeof(s));
-	/* req!=ack with state=99 (not REQ/REQ_ACK_WAIT/RSP_WAIT) → duplicate */
-	s.dc_param[LLCP_LEN_REQ] = 1; s.dc_param[LLCP_LEN_ACK] = 0;
-	s.dc_param[LLCP_LEN_RSP_TX] = 0; s.dc_param[LLCP_LEN_STATE] = 99;
-	POLICY_RUN(llcp_len_req, "malicious: dup req mid-flow",
+	s.dc_param[LLCP_LEN_REQ] = 2;
+	POLICY_RUN(llcp_len_req, "malicious: 2 in-flight reqs (duplicate)",
 		   &s, IFW_OPERATION_REJECT);
 
 	/* ----- llcp_conn_param_req (CVE-2021-3430) -----
-	 * Policy: reject if (req!=ack) AND state != REQ(0) AND state != RSP_WAIT(4) */
+	 * Same shape: reject when more than one LL_CONNECTION_PARAM_REQ is
+	 * in flight. */
 	puts("llcp_conn_param_req (CVE-2021-3430)");
 	memset(&s, 0, sizeof(s));
 	s.dc_param[LLCP_CONN_PARAM_REQ] = 1;
-	s.dc_param[LLCP_CONN_PARAM_ACK] = 1;
-	s.dc_param[LLCP_CONN_PARAM_STATE] = 0;
-	POLICY_RUN(llcp_conn_param_req, "benign: req==ack",
+	POLICY_RUN(llcp_conn_param_req, "benign: 1 in-flight CPR",
 		   &s, IFW_OPERATION_PASS);
 	memset(&s, 0, sizeof(s));
-	s.dc_param[LLCP_CONN_PARAM_REQ] = 1;
-	s.dc_param[LLCP_CONN_PARAM_ACK] = 0;
-	s.dc_param[LLCP_CONN_PARAM_STATE] = 99;
-	POLICY_RUN(llcp_conn_param_req, "malicious: dup mid-flow",
+	s.dc_param[LLCP_CONN_PARAM_REQ] = 2;
+	POLICY_RUN(llcp_conn_param_req, "malicious: 2 in-flight CPRs (duplicate)",
 		   &s, IFW_OPERATION_REJECT);
 
 	/* ----- smp_ident_check -----

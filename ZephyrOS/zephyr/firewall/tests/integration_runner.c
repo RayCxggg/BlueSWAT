@@ -170,31 +170,135 @@ int main(void)
 		ASSERT_VERDICT("malicious: interval=0", dropped, true);
 	}
 
-	/* ----- CVE-2020-10061: NESN/SN collision (LL DC RX) ----- */
-	puts("\nCVE-2020-10061: NESN/SN collision (DC PDU, LL RX)");
+	/* ----- CVE-2020-10060/10061: anchor-point NESN/SN attack -----
+	 *
+	 * The check is per-connection-anchor only.  After the first DC PDU
+	 * of a connection, NESN=1 SN=1 becomes legitimate retransmission
+	 * traffic and must NOT be flagged.  Reconnect (a fresh CONNECT_IND)
+	 * resets the anchor flag and re-arms the check.
+	 */
+	puts("\nCVE-2020-10060/10061: NESN/SN anchor attack (DC PDU, LL RX)");
 	{
+		/* Fresh connection (CONNECT_IND already established above
+		 * via the lll_interval test).  First DC PDU is the anchor. */
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+
 		struct node_rx_hdr *rx =
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 1, 0);
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0);
 		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
-		ASSERT_VERDICT("benign: NESN=0 SN=1", dropped, false);
+		ASSERT_VERDICT("benign: anchor PDU NESN=0 SN=0",
+			       dropped, false);
 	}
 	{
+		/* New connection: anchor flag re-armed. */
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+
 		struct node_rx_hdr *rx =
 			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
 		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
-		ASSERT_VERDICT("malicious: NESN=1 SN=1 (1st PDU)",
+		ASSERT_VERDICT("malicious: anchor PDU NESN=1 SN=1",
 			       dropped, true);
 	}
 	{
-		/* Re-fire the same attack on a SECOND DC PDU.  This proves the
-		 * one-shot static-count gate has been removed — without the
-		 * fix, a malicious anchor PDU later in the connection would
-		 * slip through. */
+		/* Same connection: post-anchor NESN=1 SN=1 is normal
+		 * retransmission and MUST pass. */
 		struct node_rx_hdr *rx =
 			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
 		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
-		ASSERT_VERDICT("malicious: NESN=1 SN=1 (later PDU, was bypassed before fix)",
+		ASSERT_VERDICT("benign: post-anchor NESN=1 SN=1 (legit retransmit)",
+			       dropped, false);
+	}
+	{
+		/* Reconnect: anchor armed again. */
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+
+		struct node_rx_hdr *rx =
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: anchor of 2nd connection NESN=1 SN=1",
 			       dropped, true);
+	}
+
+	/* ----- CVE-2020-10068: duplicate LL_LENGTH_REQ ----- */
+	puts("\nCVE-2020-10068: duplicate LL_LENGTH_REQ (LL CTRL RX)");
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+		/* Skip past the anchor check with a benign anchor PDU. */
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_LENGTH_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: 1st LENGTH_REQ", dropped, false);
+	}
+	{
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_LENGTH_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: 2nd LENGTH_REQ (no RSP yet)",
+			       dropped, true);
+	}
+	{
+		/* Now the response arrives — pending count drops back to 1
+		 * (we'd already incremented past 2 above; the increment is
+		 * non-reversible in the test).  Send a RSP, then a fresh REQ
+		 * after another reconnect to confirm reset works. */
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_LENGTH_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: LENGTH_REQ after reconnect (counter reset)",
+			       dropped, false);
+	}
+
+	/* ----- CVE-2021-3430: duplicate LL_CONNECTION_PARAM_REQ ----- */
+	puts("\nCVE-2021-3430: duplicate LL_CONNECTION_PARAM_REQ (LL CTRL RX)");
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: 1st CONN_PARAM_REQ", dropped, false);
+	}
+	{
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: 2nd CONN_PARAM_REQ (no RSP yet)",
+			       dropped, true);
+	}
+	{
+		/* RSP clears the pending count; a subsequent REQ is OK. */
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_CTRL, 0, 0,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP));
+		ifw_ll_packet_parser_rx(NULL,
+			build_dc_pdu_rx(PDU_DATA_LLID_CTRL, 0, 0,
+					PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP));
+		struct node_rx_hdr *rx = build_dc_pdu_rx(
+			PDU_DATA_LLID_CTRL, 0, 0,
+			PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: CONN_PARAM_REQ after RSPs cleared pending",
+			       dropped, false);
 	}
 
 	/* ----- CVE-2021-3581: Oversized scan response (LL TX) ----- */

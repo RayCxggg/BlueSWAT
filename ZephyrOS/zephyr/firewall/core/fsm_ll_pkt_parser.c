@@ -29,6 +29,22 @@ static inline uint8_t ifw_count_one(uint8_t *octets);
  * universal LL TX hook is sufficient because every outgoing PDU passes
  * through here on its way to the radio, regardless of which upper-layer
  * API generated it. */
+/* Per-connection state owned by the LL RX hook.
+ *
+ *   anchor_pdu_pending  — true between CONNECT_IND and the first DC PDU of
+ *                         the new connection.  CVE-2020-10060/10061 only
+ *                         applies to that anchor packet; checking later
+ *                         PDUs would flag legitimate retransmissions where
+ *                         NESN=1 SN=1 is normal.
+ *   llcp_len_req_pending — count of LL_LENGTH_REQ packets observed minus
+ *                          LL_LENGTH_RSP; CVE-2020-10068 fires when > 1.
+ *   llcp_cpr_pending     — same idea for LL_CONN_PARAM_REQ /
+ *                          LL_CONN_PARAM_RSP (CVE-2021-3430).
+ */
+static bool anchor_pdu_pending;
+static int  llcp_len_req_pending;
+static int  llcp_cpr_pending;
+
 bool ifw_ll_packet_parser_tx(struct pdu_adv *pdu)
 {
 	if (pdu == NULL) {
@@ -142,6 +158,11 @@ static inline void ifw_peripheral_setup(memq_link_t *link,
 	memcpy(&lll->data_chan_map[0], &pdu_adv->connect_ind.chan_map[0],
 	       sizeof(lll->data_chan_map));
 
+	/* New connection: reset per-connection state owned by the LL hooks. */
+	anchor_pdu_pending = true;
+	llcp_len_req_pending = 0;
+	llcp_cpr_pending = 0;
+
 	lll->data_chan_count = ifw_count_one(&lll->data_chan_map[0]);
 
 	// if (i == 1000) {
@@ -186,26 +207,28 @@ static inline void ifw_central_setup(memq_link_t *link, struct node_rx_hdr *rx,
 static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 {
 	struct pdu_data *pdu_rx;
-	struct ll_conn *conn;
 
 	pdu_rx = (void *)(*rx)->pdu;
 
-	// Mitigate CVE-2020-10061: every DC PDU must satisfy the NESN/SN
-	// invariant, not just the first one after boot.
-	IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
-	IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
+	/* CVE-2020-10060/10061: anchor-point-only check.  Only the first DC
+	 * PDU of each new connection is constrained; the per-connection flag
+	 * is set in ifw_peripheral_setup() on every CONNECT_IND. */
+	if (anchor_pdu_pending) {
+		anchor_pdu_pending = false;
 
-	if (IFW_RUN_VERIFIER(NESN, DC)) {
-		result = IFW_OPERATION_REJECT;
-		return;
+		IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
+		IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
+
+		if (IFW_RUN_VERIFIER(NESN, DC)) {
+			result = IFW_OPERATION_REJECT;
+			return;
+		}
 	}
 
 	switch (pdu_rx->ll_id) {
-		// check LLID here
-
-	case PDU_DATA_LLID_CTRL: {
-		ifw_ctrl_rx(link, rx, pdu_rx, conn);
-	}
+	case PDU_DATA_LLID_CTRL:
+		ifw_ctrl_rx(link, rx, pdu_rx, NULL);
+		break;
 
 	case PDU_DATA_LLID_DATA_CONTINUE:
 	case PDU_DATA_LLID_DATA_START:
@@ -217,59 +240,57 @@ static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 	return;
 }
 
-extern void *mem_acquire(void **mem_head);
-
+/* LLCP control-PDU parser.  Drives FSM state purely from observable LL
+ * traffic; the previous implementation read ll_conn->llcp_* from an
+ * uninitialized local pointer, so the policy verifiers were fed garbage
+ * and could not reliably catch the CVEs they claimed.
+ *
+ *   CVE-2020-10068  — duplicate LL_LENGTH_REQ before the response is sent.
+ *   CVE-2021-3430   — duplicate LL_CONN_PARAM_REQ before the response is sent.
+ *
+ * For each pair we track the count of in-flight requests and let an eBPF
+ * policy reject when more than one is outstanding. */
 static inline void ifw_ctrl_rx(memq_link_t *link, struct node_rx_pdu **rx,
 			       struct pdu_data *pdu_rx, struct ll_conn *conn)
 {
-	u8_t opcode;
-	opcode = pdu_rx->llctrl.opcode;
+	(void)link;
+	(void)rx;
+	(void)conn;
 
-	struct node_tx *tx = NULL;
-
-	switch (opcode) {
+	switch (pdu_rx->llctrl.opcode) {
 	case PDU_DATA_LLCTRL_TYPE_LENGTH_REQ:
-
-		/* Check for free ctrl tx PDU */
-		if (pdu_rx->llctrl.opcode == PDU_DATA_LLCTRL_TYPE_LENGTH_REQ) {
-			tx = mem_acquire(&mem_conn_tx_ctrl.free);
-			if (!tx) {
-				return -ENOBUFS;
-			}
-		}
-
-		IFW_FSM_CHECK_UPDATE(conn->llcp_length.req, LLCP_LEN_REQ, DC);
-		IFW_FSM_CHECK_UPDATE(conn->llcp_length.ack, LLCP_LEN_ACK, DC);
-		IFW_FSM_CHECK_UPDATE(tx, LLCP_LEN_RSP_TX, DC);
-		IFW_FSM_CHECK_UPDATE(conn->llcp_length.state, LLCP_LEN_STATE,
-				     DC);
-
+		llcp_len_req_pending++;
+		IFW_FSM_CHECK_UPDATE(llcp_len_req_pending, LLCP_LEN_REQ, DC);
 		if (IFW_RUN_VERIFIER(LLCP_LEN_REQ, DC)) {
 			result = IFW_OPERATION_REJECT;
 			return;
 		}
+		break;
 
+	case PDU_DATA_LLCTRL_TYPE_LENGTH_RSP:
+		if (llcp_len_req_pending > 0) {
+			llcp_len_req_pending--;
+		}
 		break;
 
 	case PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ:
-
-		if (conn->lll.role) {
-			IFW_FSM_CHECK_UPDATE(conn->llcp_conn_param.req,
-					     LLCP_CONN_PARAM_REQ, DC);
-			IFW_FSM_CHECK_UPDATE(conn->llcp_conn_param.ack,
-					     LLCP_CONN_PARAM_ACK, DC);
-			IFW_FSM_CHECK_UPDATE(conn->llcp_conn_param.state,
-					     LLCP_CONN_PARAM_STATE, DC);
-
-			if (IFW_RUN_VERIFIER(LLCP_CONN_PARAM_REQ, DC)) {
-				result = IFW_OPERATION_REJECT;
-				return;
-			}
+		llcp_cpr_pending++;
+		IFW_FSM_CHECK_UPDATE(llcp_cpr_pending, LLCP_CONN_PARAM_REQ, DC);
+		if (IFW_RUN_VERIFIER(LLCP_CONN_PARAM_REQ, DC)) {
+			result = IFW_OPERATION_REJECT;
+			return;
 		}
 		break;
-	}
 
-	return;
+	case PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP:
+		if (llcp_cpr_pending > 0) {
+			llcp_cpr_pending--;
+		}
+		break;
+
+	default:
+		break;
+	}
 }
 
 static inline uint8_t ifw_count_one(uint8_t *octets)

@@ -8,16 +8,29 @@
 // #define POLICY_ID(name) PID_##name
 
 enum fsm_policy_tag {
-	PID_conn_chan_map,
-	PID_conn_chan_hop,
-	PID_dc_nesn,
-	PID_spi_acl_len,
-	PID_spi_evt_len,
-	PID_scan_rsp_len,
-	PID_llcp_len_req,
-	PID_llcp_conn_param_req,
-	PID_lll_interval,
+	/* LL RX policies (CONNECT_IND inspection). */
+	PID_conn_chan_map,        /* CVE-2020-10069 */
+	PID_conn_chan_hop,        /* spec-compliance: hop in [5,16]   */
+	PID_lll_interval,         /* CVE-2021-3432                    */
+
+	/* LL RX policies (DC PDU inspection). */
+	PID_dc_nesn,              /* CVE-2020-10060/10061             */
+	PID_llcp_len_req,         /* CVE-2020-10068                   */
+	PID_llcp_conn_param_req,  /* CVE-2021-3430                    */
+
+	/* LL TX policy. */
+	PID_scan_rsp_len,         /* CVE-2021-3581                    */
+
+	/* L2CAP host hook (paper-adjacent extra coverage, no LL hook). */
 	PID_smp_ident_check,
+
+	/* SPI HCI policies (CVE-2020-10065) require a split-SoC build with
+	 * an SPI HCI driver.  The nRF52840 single-chip target the artifact
+	 * ships for has no SPI HCI path, so these are not registered.
+	 *
+	 *   PID_spi_acl_len,
+	 *   PID_spi_evt_len,
+	 */
 
 	// FSM policy num
 	PID_NUM,

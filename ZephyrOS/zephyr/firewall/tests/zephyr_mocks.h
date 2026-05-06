@@ -147,7 +147,9 @@ enum pdu_data_llid {
 
 enum pdu_data_llctrl_type {
 	PDU_DATA_LLCTRL_TYPE_CONN_PARAM_REQ = 0x0F,
+	PDU_DATA_LLCTRL_TYPE_CONN_PARAM_RSP = 0x10,
 	PDU_DATA_LLCTRL_TYPE_LENGTH_REQ = 0x14,
+	PDU_DATA_LLCTRL_TYPE_LENGTH_RSP = 0x15,
 };
 
 struct pdu_data_llctrl {
