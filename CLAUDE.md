@@ -28,21 +28,24 @@ on the real ARM toolchain.
 | LL TX drop path uses `radio_isr_set(isr_abort, lll); radio_disable()` instead of leaving SHORTS armed | ✅ done |
 | Integration test runs every CVE through real firewall code with synthetic packets | ✅ 26/26 pass |
 | ARM Cortex-M build confirmed (`west build -b nrf52840_pca10056 peripheral`) | ✅ FLASH 19.56% / SRAM 17.30% — within paper's log.md envelope |
-| Runtime policy install API (`ifw_install_policy`) — paper's OTA-patch capability | ✅ in-tree, host-test passes; ARM-build + commit still pending |
-| GATT vendor service for OTA bytecode upload | ⏳ not started |
+| Runtime policy install API (`ifw_install_policy`) — paper's OTA-patch capability | ✅ done, host-test passes, ARM-build clean |
+| GATT vendor service for OTA bytecode upload | ✅ done (`peripheral/src/firewall_patch.c`); ARM-build clean, write_commit objdump confirms `bl <ifw_install_policy>` |
 
-## Open todos (in priority order)
+## Open todos
 
-1. **Build option 1 on ARM toolchain** — verify the new
-   `ifw_install_policy` code in `firewall/policy/src/fsm_policy_cache.c`
-   compiles clean for `nrf52840_pca10056`.
-2. **Commit + push option 1** — the runtime install API + hot-load test
-   are uncommitted; commit them once ARM build is green.
-3. **GATT patch service (option 2)** — design and implement a
-   vendor-specific GATT service in `peripheral/src/` that accepts chunked
-   eBPF bytecode, accumulates it, and on a "commit" attribute write calls
-   `ifw_install_policy(class, type, code, len)`. ~150 lines.
-4. **ARM-build verify and commit option 2.**
+Both options 1 and 2 are now done. Possible next steps if the project continues:
+
+- **Pair an actual board with a BLE central** (e.g. nRF Connect for Mobile, or a
+  second Nordic devkit running a sample central) and exercise the full
+  patch-upload flow against the GATT service UUIDs in
+  `peripheral/src/firewall_patch.c`.
+- **Add a minimal eBPF verifier** (bounds, max-instruction-count, no-loops)
+  before `ifw_install_policy` accepts bytecode — currently a malformed
+  payload could hang the interpreter.
+- **Sign the patches.** Add LE Secure Connections requirement on the GATT
+  characteristics + payload signature verification before install.
+- **Mynewt/NimBLE port.** Mirror these changes onto the Mynewt artifact
+  half — same design, different stack glue.
 
 ## How to reproduce the build/tests
 
@@ -84,6 +87,19 @@ cd ZephyrOS && rm -rf build && west build -b nrf52840_pca10056 peripheral
 | `ZephyrOS/zephyr/subsys/bluetooth/controller/ll_sw/ull.c` | Hosts the LL RX dispatcher (line 1597) and `ifw_fsm_init()` (line 247) |
 | `ZephyrOS/zephyr/subsys/bluetooth/host/l2cap.c` | Hosts the L2CAP RX hook (line 1824, for SMP downgrade) |
 | `ZephyrOS/zephyr/firewall/tests/` | Host runner + Zephyr-mock integration runner |
+| `ZephyrOS/peripheral/src/firewall_patch.c` | Vendor GATT service (4 chars: header / body / commit / status) that calls `ifw_install_policy` on commit |
+
+## GATT patch service UUIDs (`peripheral/src/firewall_patch.c`)
+
+128-bit, base `bd00****-7e57-49a1-a0bd-e6cf8d00f1ed`:
+
+| Characteristic | UUID first 32 bits | Permission | Purpose |
+|---|---|---|---|
+| Service | `bd000001` | — | Primary service container |
+| Header | `bd000002` | write, 2 bytes `[class, type]` | Set target FSM slot, reset staging |
+| Body | `bd000003` | write, N bytes per write, appends | Accumulate bytecode chunks |
+| Commit | `bd000004` | write, 1 byte | Call `ifw_install_policy` with staged bytes |
+| Status | `bd000005` | read, returns last `s32_t` rc | Read install result code |
 
 ## Residual gaps (paper vs. artifact, after current work)
 
