@@ -124,6 +124,9 @@ typedef enum {
 	SMP_ENC_SIZE,
 	SMP_KEYS_FLAGS,
 
+	/* Per-policy slot for dc_nesn anchor-state tracking. */
+	DC_ANCHOR_STATE,
+
 	// end
 	IFW_DC_PARAM_NUM,
 } IFW_DC_PARAM;

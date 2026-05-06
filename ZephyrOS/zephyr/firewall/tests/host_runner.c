@@ -28,7 +28,7 @@
 #define IFW_CORE_STATE_NUM   5
 #define IFW_SHARED_STATE_NUM 3
 #define IFW_CONN_PARAM_NUM   4
-#define IFW_DC_PARAM_NUM     14
+#define IFW_DC_PARAM_NUM     15
 #define IFW_SPI_PARAM_NUM    2
 
 /* core_state index */
@@ -44,6 +44,7 @@ enum {
 	LLCP_CONN_PARAM_REQ, LLCP_CONN_PARAM_ACK, LLCP_CONN_PARAM_STATE,
 	SMP_ENC_SIZE_PREV, SMP_METHOD_PREV, SMP_KEYS, SMP_ENC_SIZE,
 	SMP_KEYS_FLAGS,
+	DC_ANCHOR_STATE,
 };
 /* spi_param index */
 enum { HCI_EVT_LEN = 0, HCI_ACL_LEN };
@@ -133,14 +134,24 @@ int main(void)
 	POLICY_RUN(conn_chan_hop, "malicious: hop=17", &s, IFW_OPERATION_REJECT);
 
 	/* ----- dc_nesn (CVE-2020-10061) -----
-	 * Policy: reject if NESN==1 && SN==1 (anchor-point collision). */
-	puts("dc_nesn (CVE-2020-10061)");
+	 * Policy: reject only when DC_ANCHOR_STATE==1 (anchor pending) AND
+	 * NESN==1 && SN==1.  Post-anchor (DC_ANCHOR_STATE==0) the same byte
+	 * pattern is legitimate retransmission. */
+	puts("dc_nesn (CVE-2020-10060/10061)");
 	memset(&s, 0, sizeof(s));
+	s.dc_param[DC_ANCHOR_STATE] = 1;
 	s.dc_param[NESN] = 0; s.dc_param[SN] = 1;
-	POLICY_RUN(dc_nesn, "benign: NESN=0 SN=1", &s, IFW_OPERATION_PASS);
+	POLICY_RUN(dc_nesn, "benign: anchor+NESN=0 SN=1", &s, IFW_OPERATION_PASS);
 	memset(&s, 0, sizeof(s));
+	s.dc_param[DC_ANCHOR_STATE] = 1;
 	s.dc_param[NESN] = 1; s.dc_param[SN] = 1;
-	POLICY_RUN(dc_nesn, "malicious: NESN=1 SN=1", &s, IFW_OPERATION_REJECT);
+	POLICY_RUN(dc_nesn, "malicious: anchor+NESN=1 SN=1",
+		   &s, IFW_OPERATION_REJECT);
+	memset(&s, 0, sizeof(s));
+	s.dc_param[DC_ANCHOR_STATE] = 0; /* post-anchor */
+	s.dc_param[NESN] = 1; s.dc_param[SN] = 1;
+	POLICY_RUN(dc_nesn, "benign: post-anchor NESN=1 SN=1 (legit retransmit)",
+		   &s, IFW_OPERATION_PASS);
 
 	/* ----- spi_acl_len (CVE-2020-10065 ACL) -----
 	 * Policy: reject if spi_param[HCI_ACL_LEN] > 76 (overflows BT_BUF_RX_SIZE). */

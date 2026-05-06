@@ -163,11 +163,12 @@ static inline void ifw_peripheral_setup(memq_link_t *link,
 	llcp_len_req_pending = 0;
 	llcp_cpr_pending = 0;
 
-	/* Drive the lifecycle transition into the FSM so the dc_nesn policy
-	 * can consult it: STATE_NUM (uninitialized) -> CONNECTION_STATE
-	 * (anchor pending).  ifw_conn_rx flips it to STANDBY_STATE after the
-	 * first DC PDU has been processed. */
-	IFW_FSM_CHECK_UPDATE(IFW_BLE_LL_CONNECTION_STATE, LL_STATE, CORE);
+	/* Arm the dc_nesn anchor gate by writing into the FSM's per-policy
+	 * dc_param slot.  ifw_conn_rx clears it to 0 once the anchor PDU has
+	 * been processed.  Core state classes (LL_STATE etc.) belong to the
+	 * global LL state machine and are intentionally not touched by the
+	 * firewall hook — per-policy tracking lives in the param classes. */
+	IFW_FSM_CHECK_UPDATE(1, DC_ANCHOR_STATE, DC);
 
 	lll->data_chan_count = ifw_count_one(&lll->data_chan_map[0]);
 
@@ -217,10 +218,10 @@ static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 	pdu_rx = (void *)(*rx)->pdu;
 
 	/* CVE-2020-10060/10061: anchor-point check.  The dc_nesn policy
-	 * reads core_state[LL_STATE] alongside dc_param[NESN/SN] and only
-	 * rejects when LL_STATE == CONNECTION (anchor pending).  After the
-	 * verifier runs we transition LL_STATE to STANDBY so subsequent
-	 * legitimate retransmits with NESN=1 SN=1 pass through. */
+	 * reads dc_param[DC_ANCHOR_STATE] alongside dc_param[NESN/SN] and
+	 * rejects only while DC_ANCHOR_STATE == 1 (anchor pending).  After
+	 * the verifier runs we clear the slot so subsequent legitimate
+	 * retransmits with NESN=1 SN=1 pass through. */
 	IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
 	IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
 
@@ -229,7 +230,7 @@ static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 		return;
 	}
 
-	IFW_FSM_CHECK_UPDATE(IFW_BLE_LL_STANDBY_STATE, LL_STATE, CORE);
+	IFW_FSM_CHECK_UPDATE(0, DC_ANCHOR_STATE, DC);
 
 	switch (pdu_rx->ll_id) {
 	case PDU_DATA_LLID_CTRL:
