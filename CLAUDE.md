@@ -5,9 +5,12 @@ should pick up automatically. Update it when the project state changes.
 
 ## Current branch
 
-`claude/repo-overview-0GARh` — paper-alignment work on the BlueSWAT
-artifact (Che et al., CCS 2024, arXiv:2405.17987). All commits should go
-to this branch on the `RayCxggg/blueswat` GitHub remote.
+`claude/create-todo-app-J4dfl` — Mynewt/NimBLE port mirroring the
+prior Zephyr-side paper-alignment work (Che et al., CCS 2024,
+arXiv:2405.17987). All commits should go to this branch on the
+`RayCxggg/blueswat` GitHub remote.
+
+Earlier work landed on `claude/repo-overview-0GARh` (Zephyr side).
 
 ## What we've done so far
 
@@ -34,17 +37,46 @@ on the real ARM toolchain.
 
 ## Open todos
 
-The C-level capability, the GATT delivery layer, and the verifier are
-all done.  Remaining items if the project continues:
+The C-level capability, the GATT delivery layer, the verifier, and the
+Mynewt/NimBLE port are all done.  Remaining items if the project
+continues:
 
 - **Pair an actual board with a BLE central** (e.g. nRF Connect for Mobile, or a
   second Nordic devkit running a sample central) and exercise the full
   patch-upload flow against the GATT service UUIDs in
-  `peripheral/src/firewall_patch.c`.
+  `peripheral/src/firewall_patch.c` (Zephyr) or
+  `Mynewt/repos/apache-mynewt-nimble/nimble/host/services/firewall/` (Mynewt).
 - **Sign the patches.** Add LE Secure Connections requirement on the GATT
   characteristics + payload signature verification before install.
-- **Mynewt/NimBLE port.** Mirror these changes onto the Mynewt artifact
-  half — same design, different stack glue.
+- **End-to-end Mynewt build verification.** The Mynewt port has been
+  written and is structurally consistent with the Zephyr port, but
+  cannot be compiled in this environment (no `newt` toolchain or
+  populated `apache-mynewt-core` submodule). Once the toolchain is
+  available, `newt build peripheral` is expected to succeed; until
+  then the Mynewt half should be considered "ported by inspection,
+  not yet built."
+
+## Mynewt/NimBLE port (mirror of the Zephyr work)
+
+All structural changes from the Zephyr port have been mirrored onto the
+Mynewt artifact.  Files live under
+`Mynewt/repos/apache-mynewt-nimble/firewall/` and the new GATT service
+under `Mynewt/repos/apache-mynewt-nimble/nimble/host/services/firewall/`.
+
+| Concern | Status |
+|---|---|
+| `struct FsmState` switched to `int` arrays so Zephyr-compiled bytecodes are ABI-compatible | ✅ done |
+| 8 policies registered (`load_all_policies` in `firewall/policy/src/fsm_policy_cache.c`) | ✅ done |
+| All 8 Zephyr bytecodes copied to `firewall/policy/specification/include/` | ✅ done |
+| LL RX hook covers conn_chan_map / conn_chan_hop / lll_interval (CONNECT_IND) and the mid-session variants via `ifw_dc_ll_ctrl_parser` (CHANNEL_MAP_REQ + CONN_UPDATE_IND) | ✅ done |
+| `llcp_len_req_pending` / `llcp_cpr_pending` counters drive the FSM (was: missing entirely on Mynewt half) | ✅ done |
+| LL TX hook for SCAN_RSP_LEN exposed via `ifw_ll_adv_tx_parser()` | ✅ done — adv-role still needs to call this, see "Open todos" |
+| dc_nesn anchor gate uses `dc_param[DC_ANCHOR_STATE]` (set on CONNECT_IND, cleared by the dc-pdu hook) | ✅ done |
+| Runtime policy install API (`ifw_install_policy`) | ✅ done in `firewall/policy/src/fsm_policy_cache.c` |
+| Structural eBPF verifier (instr cap, no back-jumps, no CALL, no stores, bounds-checked LDX, must-EXIT) | ✅ done, same return codes (-10..-21) as Zephyr |
+| GATT vendor service for OTA bytecode upload | ✅ done — `nimble/host/services/firewall/` (same UUID base `bd00****-7e57-49a1-a0bd-e6cf8d00f1ed` as the Zephyr peer) |
+| Pre-existing compile-blocking bugs fixed (`utils.h` orphan `#else`, `fsm_handle.h` missing semicolon, `fsm_update_handle.c` macro misuse) | ✅ done |
+| `newt build` verified | ⏳ blocked — Mynewt toolchain + apache-mynewt-core submodule not available in this env |
 
 ## How to reproduce the build/tests
 
@@ -86,7 +118,11 @@ cd ZephyrOS && rm -rf build && west build -b nrf52840_pca10056 peripheral
 | `ZephyrOS/zephyr/subsys/bluetooth/controller/ll_sw/ull.c` | Hosts the LL RX dispatcher (line 1597) and `ifw_fsm_init()` (line 247) |
 | `ZephyrOS/zephyr/subsys/bluetooth/host/l2cap.c` | Hosts the L2CAP RX hook (line 1824, for SMP downgrade) |
 | `ZephyrOS/zephyr/firewall/tests/` | Host runner + Zephyr-mock integration runner |
-| `ZephyrOS/peripheral/src/firewall_patch.c` | Vendor GATT service (4 chars: header / body / commit / status) that calls `ifw_install_policy` on commit |
+| `ZephyrOS/peripheral/src/firewall_patch.c` | Zephyr vendor GATT service (4 chars: header / body / commit / status) that calls `ifw_install_policy` on commit |
+| `Mynewt/repos/apache-mynewt-nimble/firewall/policy/src/fsm_policy_cache.c` | Mynewt mirror — 8 policies + `ifw_install_policy` + structural verifier |
+| `Mynewt/repos/apache-mynewt-nimble/firewall/src/fsm_ll_parser.c` | Mynewt LL RX hook — CONNECT_IND chan_map/hop/interval + LLCP-driven dc-PDU policies |
+| `Mynewt/repos/apache-mynewt-nimble/firewall/src/fsm_tx_parser.c` | Mynewt LL TX hook — `ifw_ll_adv_tx_parser()` for SCAN_RSP_LEN |
+| `Mynewt/repos/apache-mynewt-nimble/nimble/host/services/firewall/src/ble_svc_firewall_patch.c` | Mynewt vendor GATT service mirroring the Zephyr `firewall_patch.c` |
 
 ## GATT patch service UUIDs (`peripheral/src/firewall_patch.c`)
 
