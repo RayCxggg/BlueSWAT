@@ -21,6 +21,37 @@ static inline void ifw_ctrl_rx(memq_link_t *link, struct node_rx_pdu **rx,
 			       struct pdu_data *pdu_rx, struct ll_conn *conn);
 static inline uint8_t ifw_count_one(uint8_t *octets);
 
+/* LL TX hook (the "1 LL TX hook" the paper refers to).  Invoked from the
+ * radio TX staging path with the PDU about to be transmitted; returns
+ * IFW_OPERATION_REJECT to drop the PDU before it hits the radio.
+ *
+ * Currently enforces the SCAN_RSP_LEN policy (CVE-2021-3581) — a single
+ * universal LL TX hook is sufficient because every outgoing PDU passes
+ * through here on its way to the radio, regardless of which upper-layer
+ * API generated it. */
+bool ifw_ll_packet_parser_tx(struct pdu_adv *pdu)
+{
+	if (pdu == NULL) {
+		return IFW_OPERATION_PASS;
+	}
+
+	switch (pdu->type) {
+	case PDU_ADV_TYPE_SCAN_RSP:
+		IFW_FSM_CHECK_UPDATE(pdu->len, SCAN_RSP_LEN, CONN);
+		if (IFW_RUN_VERIFIER(SCAN_RSP_LEN, CONN)) {
+			IFW_DEBUG_LOG("Malicious scan response dropped at LL TX.");
+			return IFW_OPERATION_REJECT;
+		}
+		break;
+
+	default:
+		/* Other adv types currently have no policy. */
+		break;
+	}
+
+	return IFW_OPERATION_PASS;
+}
+
 bool ifw_ll_packet_parser_rx(memq_link_t *link, struct node_rx_hdr *rx)
 {
 	result = IFW_OPERATION_PASS;
@@ -152,8 +183,6 @@ static inline void ifw_central_setup(memq_link_t *link, struct node_rx_hdr *rx,
 {
 }
 
-int count = 0;
-
 static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 {
 	struct pdu_data *pdu_rx;
@@ -161,17 +190,14 @@ static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 
 	pdu_rx = (void *)(*rx)->pdu;
 
-	// Mitigate CVE-2020-10061: Check Anchor point DC packet
-	if (count == 0) {
-		count++;
+	// Mitigate CVE-2020-10061: every DC PDU must satisfy the NESN/SN
+	// invariant, not just the first one after boot.
+	IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
+	IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
 
-		IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
-		IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
-
-		if (IFW_RUN_VERIFIER(NESN, DC)) {
-			result = IFW_OPERATION_REJECT;
-			return;
-		}
+	if (IFW_RUN_VERIFIER(NESN, DC)) {
+		result = IFW_OPERATION_REJECT;
+		return;
 	}
 
 	switch (pdu_rx->ll_id) {

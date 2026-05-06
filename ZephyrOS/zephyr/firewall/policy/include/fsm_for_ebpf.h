@@ -137,6 +137,16 @@ typedef enum {
 	IFW_SPI_PARAM_NUM,
 } IFW_SPI_PARAM;
 
+// FSM param of HCI core (mirrors fsm_core.h on the kernel side so that the
+// FsmState struct below has every field defined). Without this the .ebpf.c
+// programs fail to compile with clang -target bpf.
+typedef enum {
+	HCI_CMD_BUF = 0,
+
+	// end
+	IFW_HCI_PARAM_NUM,
+} IFW_HCI_PARAM;
+
 enum ifw_state_class {
 	SHARED = 0,
 	CORE,

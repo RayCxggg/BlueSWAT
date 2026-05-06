@@ -1,0 +1,242 @@
+/*
+ * BlueSWAT Zephyr-stack integration test.
+ *
+ * Compiles firewall/core/*.c and firewall/policy/src/*.c natively (against
+ * zephyr_mocks.h) and drives synthetic CVE attack packets through the
+ * actual hook functions (ifw_ll_packet_parser_rx / ifw_ll_packet_parser_tx).
+ * Asserts that each malicious packet is rejected (IFW_OPERATION_REJECT) and
+ * that benign packets pass.
+ *
+ * This is the "do they actually mitigate the CVE in the Zephyr stack" test
+ * — it exercises FSM update + policy lookup + eBPF execution + the hook
+ * dispatch logic, end-to-end, with no Zephyr SDK or hardware required.
+ */
+
+#include "zephyr_mocks.h"
+#include "fsm_handle.h"
+#include "fsm_core.h"
+#include "include/fsm_policy_cache.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+
+/* ----- Stubs the firewall calls ----- */
+struct mem_conn_tx_ctrl_t mem_conn_tx_ctrl;
+static struct node_tx fake_tx_node;
+
+/* JIT path is unused in this harness (we always pass jit=false). */
+struct ebpf_vm;
+void gen_jit_code(struct ebpf_vm *vm) { (void)vm; }
+void *mem_acquire(void **mem_head)
+{
+	/* return non-null so the LLCP_LEN_REQ branch in ifw_ctrl_rx proceeds */
+	return &fake_tx_node;
+}
+
+static struct bt_l2cap_chan g_fake_chan;
+struct bt_l2cap_chan *bt_l2cap_le_lookup_rx_cid(struct bt_conn *conn, u16_t cid)
+{
+	return &g_fake_chan;
+}
+u8_t get_encryption_key_size(struct bt_smp *smp) { return 16; }
+int bt_addr_le_cmp(const struct bt_addr_le *a, const struct bt_addr_le *b)
+{
+	return memcmp(a, b, sizeof(*a));
+}
+struct bt_keys g_fake_keys;
+struct bt_keys *bt_keys_find_addr(u8_t id, const struct bt_addr_le *addr)
+{
+	return &g_fake_keys;
+}
+
+/* ----- Helpers to build synthetic packets ----- */
+
+/* The firewall fishes lll_conn out of ftr->param via:
+ *   lll = *((struct lll_conn **)((u8_t *)ftr->param + sizeof(struct lll_hdr)));
+ * so we set ftr->param to a buffer with [lll_hdr | lll_conn*]. */
+struct fake_param_layout {
+	struct lll_hdr hdr;
+	struct lll_conn *lll;
+};
+
+static struct lll_conn g_lll;
+static struct fake_param_layout g_param_layout;
+static u8_t g_rx_buf[sizeof(struct node_rx_hdr) + sizeof(struct pdu_adv) + 32];
+static u8_t g_dc_buf[sizeof(struct node_rx_hdr) + sizeof(struct pdu_data) + 32];
+
+static struct node_rx_hdr *
+build_connect_ind_rx(u8_t chan_map[5], u8_t hop, u16_t interval)
+{
+	memset(g_rx_buf, 0, sizeof(g_rx_buf));
+	memset(&g_lll, 0, sizeof(g_lll));
+	g_lll.role = 1; /* peripheral — only role the firewall covers */
+	g_param_layout.lll = &g_lll;
+
+	struct node_rx_hdr *rx = (struct node_rx_hdr *)g_rx_buf;
+	rx->type = NODE_RX_TYPE_CONNECTION;
+	rx->rx_ftr.param = &g_param_layout;
+
+	struct pdu_adv *pdu = (struct pdu_adv *)((u8_t *)rx + sizeof(*rx));
+	pdu->type = PDU_ADV_TYPE_CONNECT_IND;
+	pdu->len = sizeof(struct pdu_adv_connect_ind);
+	memcpy(pdu->connect_ind.chan_map, chan_map, 5);
+	pdu->connect_ind.hop = hop;
+	pdu->connect_ind.interval = interval;
+	return rx;
+}
+
+static struct node_rx_hdr *
+build_dc_pdu_rx(u8_t ll_id, u8_t nesn, u8_t sn, u8_t ctrl_opcode)
+{
+	memset(g_dc_buf, 0, sizeof(g_dc_buf));
+
+	struct node_rx_hdr *rx = (struct node_rx_hdr *)g_dc_buf;
+	rx->type = NODE_RX_TYPE_DC_PDU;
+
+	struct pdu_data *pdu = (struct pdu_data *)((u8_t *)rx + sizeof(*rx));
+	pdu->ll_id = ll_id;
+	pdu->nesn = nesn;
+	pdu->sn = sn;
+	pdu->llctrl.opcode = ctrl_opcode;
+	pdu->len = 1;
+	return rx;
+}
+
+/* ----- Test driver ----- */
+
+static int failures;
+static int total;
+
+#define ASSERT_VERDICT(label, verdict, expected) do {                         \
+	const char *_e = (expected) ? "REJECT" : "PASS";                      \
+	const char *_g = (verdict) ? "REJECT" : "PASS";                       \
+	bool _ok = ((bool)(verdict)) == ((bool)(expected));                   \
+	total++;                                                              \
+	if (!_ok) failures++;                                                 \
+	printf("  [%s] %-55s expected=%s got=%s\n",                           \
+	       _ok ? "PASS" : "FAIL", (label), _e, _g);                       \
+} while (0)
+
+int main(void)
+{
+	puts("BlueSWAT Zephyr-stack integration tests");
+	puts("=======================================");
+
+	/* Initialize the FSM and load all policies, like the firmware does. */
+	ifw_fsm_init();
+	ifw_fsm_enable(false);
+
+	/* ----- CVE-2020-10069: Invalid Channel Map (LL ADV RX) ----- */
+	puts("\nCVE-2020-10069: Invalid Channel Map (CONNECT_IND, LL RX)");
+	{
+		u8_t good_map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f}; /* 37 chans */
+		struct node_rx_hdr *rx = build_connect_ind_rx(good_map, 7, 24);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: 37 channels, hop=7, interval=24",
+			       dropped, false);
+	}
+	{
+		u8_t bad_map[5] = {0x01, 0x00, 0x00, 0x00, 0x00}; /* 1 chan */
+		struct node_rx_hdr *rx = build_connect_ind_rx(bad_map, 7, 24);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: 1 channel (Sweyntooth)",
+			       dropped, true);
+	}
+
+	/* ----- conn_chan_hop policy (paired with above hook) ----- */
+	puts("\nconn_chan_hop (CONNECT_IND, LL RX)");
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		struct node_rx_hdr *rx = build_connect_ind_rx(map, 4, 24);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: hop=4 (below spec minimum 5)",
+			       dropped, true);
+	}
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		struct node_rx_hdr *rx = build_connect_ind_rx(map, 17, 24);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: hop=17 (above spec maximum 16)",
+			       dropped, true);
+	}
+
+	/* ----- CVE-2021-3432: Zero LL interval (CONNECT_IND, LL RX) ----- */
+	puts("\nCVE-2021-3432: Zero LL interval (CONNECT_IND, LL RX)");
+	{
+		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
+		struct node_rx_hdr *rx = build_connect_ind_rx(map, 7, 0);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: interval=0", dropped, true);
+	}
+
+	/* ----- CVE-2020-10061: NESN/SN collision (LL DC RX) ----- */
+	puts("\nCVE-2020-10061: NESN/SN collision (DC PDU, LL RX)");
+	{
+		struct node_rx_hdr *rx =
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 1, 0);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("benign: NESN=0 SN=1", dropped, false);
+	}
+	{
+		struct node_rx_hdr *rx =
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: NESN=1 SN=1 (1st PDU)",
+			       dropped, true);
+	}
+	{
+		/* Re-fire the same attack on a SECOND DC PDU.  This proves the
+		 * one-shot static-count gate has been removed — without the
+		 * fix, a malicious anchor PDU later in the connection would
+		 * slip through. */
+		struct node_rx_hdr *rx =
+			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
+		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		ASSERT_VERDICT("malicious: NESN=1 SN=1 (later PDU, was bypassed before fix)",
+			       dropped, true);
+	}
+
+	/* ----- CVE-2021-3581: Oversized scan response (LL TX) ----- */
+	puts("\nCVE-2021-3581: Oversized scan response (LL TX hook)");
+	{
+		struct pdu_adv pdu = { .type = PDU_ADV_TYPE_SCAN_RSP, .len = 31 };
+		bool dropped = ifw_ll_packet_parser_tx(&pdu);
+		ASSERT_VERDICT("benign: scan_rsp len=31", dropped, false);
+	}
+	{
+		struct pdu_adv pdu = { .type = PDU_ADV_TYPE_SCAN_RSP, .len = 200 };
+		bool dropped = ifw_ll_packet_parser_tx(&pdu);
+		ASSERT_VERDICT("malicious: scan_rsp len=200", dropped, true);
+	}
+	{
+		/* TX hook only inspects scan responses; other adv types pass. */
+		struct pdu_adv pdu = { .type = PDU_ADV_TYPE_ADV_IND, .len = 200 };
+		bool dropped = ifw_ll_packet_parser_tx(&pdu);
+		ASSERT_VERDICT("benign: ADV_IND len=200 (not a scan rsp, ignored)",
+			       dropped, false);
+	}
+
+	/* ----- Note on LLCP_LEN_REQ / LLCP_CONN_PARAM_REQ -----
+	 * The current LL DC RX path in ifw_conn_rx -> ifw_ctrl_rx passes an
+	 * uninitialized `struct ll_conn *conn` into the LLCP CTRL handlers,
+	 * so feeding a real CTRL PDU at this layer reads garbage memory.
+	 * We don't drive that path here; it would need the FSM to obtain the
+	 * connection state from `lll` (which is already chased) rather than
+	 * a never-set local variable.  Leaving this gap as a separate finding. */
+
+	/* ----- SMP downgrade -----
+	 * Lives behind the L2CAP host-side hook (ifw_l2cap_packet_parser_recv);
+	 * the paper's pure-LL claim does not extend here because SMP key
+	 * state is host-only. Tested in isolation via the bytecode-level
+	 * harness (host_runner). */
+
+	/* ----- Summary ----- */
+	puts("\n=======================================");
+	if (failures == 0) {
+		printf("ALL %d INTEGRATION TESTS PASSED\n", total);
+	} else {
+		printf("%d / %d INTEGRATION TESTS FAILED\n", failures, total);
+	}
+	return failures ? 1 : 0;
+}

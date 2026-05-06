@@ -1,2 +1,3 @@
 host_runner
+integration_runner
 *.o

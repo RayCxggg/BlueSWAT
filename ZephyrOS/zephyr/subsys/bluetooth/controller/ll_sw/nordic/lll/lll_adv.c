@@ -40,6 +40,8 @@
 #define LOG_MODULE_NAME bt_ctlr_lll_adv
 #include "common/log.h"
 #include <soc.h>
+
+#include "fsm_handle.h"
 #include "hal/debug.h"
 
 static int init_reset(void);
@@ -652,9 +654,18 @@ static inline int isr_rx_pdu(struct lll_adv *lll, u8_t devmatch_ok,
 	    (pdu_rx->len == sizeof(struct pdu_adv_scan_req)) &&
 	    (pdu_adv->type != PDU_ADV_TYPE_DIRECT_IND) &&
 	    isr_rx_sr_check(lll, pdu_adv, pdu_rx, devmatch_ok, &rl_idx)) {
+		struct pdu_adv *scan_rsp_pdu = lll_adv_scan_rsp_curr_get(lll);
+
 		radio_isr_set(isr_done, lll);
 		radio_switch_complete_and_disable();
-		radio_pkt_tx_set(lll_adv_scan_rsp_curr_get(lll));
+
+		/* BlueSWAT LL TX hook (CVE-2021-3581 et al.).  Drops the
+		 * scan response if the policy verifier rejects it; the radio
+		 * is already configured to disable on switch-complete, so
+		 * skipping radio_pkt_tx_set() is sufficient. */
+		if (!IFW_LL_TX_PARSER(scan_rsp_pdu)) {
+			radio_pkt_tx_set(scan_rsp_pdu);
+		}
 
 		/* assert if radio packet ptr is not set and radio started tx */
 		LL_ASSERT(!radio_is_ready());
