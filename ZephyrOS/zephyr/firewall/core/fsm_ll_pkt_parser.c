@@ -29,19 +29,20 @@ static inline uint8_t ifw_count_one(uint8_t *octets);
  * universal LL TX hook is sufficient because every outgoing PDU passes
  * through here on its way to the radio, regardless of which upper-layer
  * API generated it. */
-/* Per-connection state owned by the LL RX hook.
+/* Per-connection counters owned by the LL RX hook.  These mirror values
+ * pushed into the FSM via IFW_FSM_CHECK_UPDATE so the policy verifier can
+ * read them.
  *
- *   anchor_pdu_pending  — true between CONNECT_IND and the first DC PDU of
- *                         the new connection.  CVE-2020-10060/10061 only
- *                         applies to that anchor packet; checking later
- *                         PDUs would flag legitimate retransmissions where
- *                         NESN=1 SN=1 is normal.
  *   llcp_len_req_pending — count of LL_LENGTH_REQ packets observed minus
  *                          LL_LENGTH_RSP; CVE-2020-10068 fires when > 1.
  *   llcp_cpr_pending     — same idea for LL_CONN_PARAM_REQ /
  *                          LL_CONN_PARAM_RSP (CVE-2021-3430).
+ *
+ * The anchor-point gate that used to live here as a separate static is
+ * now expressed in the FSM itself: core_state[LL_STATE] transitions
+ * IFW_BLE_LL_CONNECTION_STATE -> IFW_BLE_LL_STANDBY_STATE on the first DC
+ * PDU of each connection, and the dc_nesn policy reads that field.
  */
-static bool anchor_pdu_pending;
 static int  llcp_len_req_pending;
 static int  llcp_cpr_pending;
 
@@ -158,10 +159,15 @@ static inline void ifw_peripheral_setup(memq_link_t *link,
 	memcpy(&lll->data_chan_map[0], &pdu_adv->connect_ind.chan_map[0],
 	       sizeof(lll->data_chan_map));
 
-	/* New connection: reset per-connection state owned by the LL hooks. */
-	anchor_pdu_pending = true;
+	/* New connection: reset per-connection state. */
 	llcp_len_req_pending = 0;
 	llcp_cpr_pending = 0;
+
+	/* Drive the lifecycle transition into the FSM so the dc_nesn policy
+	 * can consult it: STATE_NUM (uninitialized) -> CONNECTION_STATE
+	 * (anchor pending).  ifw_conn_rx flips it to STANDBY_STATE after the
+	 * first DC PDU has been processed. */
+	IFW_FSM_CHECK_UPDATE(IFW_BLE_LL_CONNECTION_STATE, LL_STATE, CORE);
 
 	lll->data_chan_count = ifw_count_one(&lll->data_chan_map[0]);
 
@@ -210,20 +216,20 @@ static inline void ifw_conn_rx(memq_link_t *link, struct node_rx_pdu **rx)
 
 	pdu_rx = (void *)(*rx)->pdu;
 
-	/* CVE-2020-10060/10061: anchor-point-only check.  Only the first DC
-	 * PDU of each new connection is constrained; the per-connection flag
-	 * is set in ifw_peripheral_setup() on every CONNECT_IND. */
-	if (anchor_pdu_pending) {
-		anchor_pdu_pending = false;
+	/* CVE-2020-10060/10061: anchor-point check.  The dc_nesn policy
+	 * reads core_state[LL_STATE] alongside dc_param[NESN/SN] and only
+	 * rejects when LL_STATE == CONNECTION (anchor pending).  After the
+	 * verifier runs we transition LL_STATE to STANDBY so subsequent
+	 * legitimate retransmits with NESN=1 SN=1 pass through. */
+	IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
+	IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
 
-		IFW_FSM_CHECK_UPDATE(pdu_rx->nesn, NESN, DC);
-		IFW_FSM_CHECK_UPDATE(pdu_rx->sn, SN, DC);
-
-		if (IFW_RUN_VERIFIER(NESN, DC)) {
-			result = IFW_OPERATION_REJECT;
-			return;
-		}
+	if (IFW_RUN_VERIFIER(NESN, DC)) {
+		result = IFW_OPERATION_REJECT;
+		return;
 	}
+
+	IFW_FSM_CHECK_UPDATE(IFW_BLE_LL_STANDBY_STATE, LL_STATE, CORE);
 
 	switch (pdu_rx->ll_id) {
 	case PDU_DATA_LLID_CTRL:
@@ -258,6 +264,22 @@ static inline void ifw_ctrl_rx(memq_link_t *link, struct node_rx_pdu **rx,
 	(void)conn;
 
 	switch (pdu_rx->llctrl.opcode) {
+	case PDU_DATA_LLCTRL_TYPE_CONN_UPDATE_IND: {
+		/* CVE-2021-3432 mid-session variant.  The same zero-interval
+		 * vulnerability the CONNECT_IND check covers re-arms when the
+		 * peer issues an LL_CONN_UPDATE_IND.  Run the lll_interval
+		 * policy on the proposed interval. */
+		u16_t new_interval = sys_le16_to_cpu(
+			pdu_rx->llctrl.conn_update_ind.interval);
+
+		IFW_FSM_CHECK_UPDATE(new_interval, LLL_INTERVAL, CONN);
+		if (IFW_RUN_VERIFIER(LLL_INTERVAL, CONN)) {
+			result = IFW_OPERATION_REJECT;
+			return;
+		}
+		break;
+	}
+
 	case PDU_DATA_LLCTRL_TYPE_CHAN_MAP_IND: {
 		/* CVE-2020-10069 mid-session variant.  The same channel-map
 		 * vulnerability that the CONNECT_IND check covers can be

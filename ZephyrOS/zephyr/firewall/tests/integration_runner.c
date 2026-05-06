@@ -114,6 +114,23 @@ build_chan_map_ind_rx(u8_t chm[5])
 	return rx;
 }
 
+/* Build an LL_CONNECTION_UPDATE_IND CTRL PDU. */
+static struct node_rx_hdr *
+build_conn_update_ind_rx(u16_t interval)
+{
+	struct node_rx_hdr *rx = build_dc_pdu_rx(
+		PDU_DATA_LLID_CTRL, 0, 0, PDU_DATA_LLCTRL_TYPE_CONN_UPDATE_IND);
+	struct pdu_data *pdu = (struct pdu_data *)((u8_t *)rx + sizeof(*rx));
+	pdu->llctrl.conn_update_ind.interval = interval;
+	return rx;
+}
+
+/* Build a benign DC PDU (LLID_DATA_START) — not a CTRL PDU. */
+static struct node_rx_hdr *build_data_pdu_rx(u8_t nesn, u8_t sn)
+{
+	return build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, nesn, sn, 0);
+}
+
 /* ----- Test driver ----- */
 
 static int failures;
@@ -183,53 +200,64 @@ int main(void)
 
 	/* ----- CVE-2020-10060/10061: anchor-point NESN/SN attack -----
 	 *
-	 * The check is per-connection-anchor only.  After the first DC PDU
-	 * of a connection, NESN=1 SN=1 becomes legitimate retransmission
-	 * traffic and must NOT be flagged.  Reconnect (a fresh CONNECT_IND)
-	 * resets the anchor flag and re-arms the check.
+	 * The dc_nesn policy reads core_state[LL_STATE] alongside NESN/SN.
+	 * On CONNECT_IND the LL hook drives LL_STATE to CONNECTION_STATE;
+	 * after a successful anchor verifier it transitions to STANDBY.  A
+	 * post-anchor NESN=1/SN=1 pair therefore reads (LL_STATE=STANDBY,
+	 * NESN=1, SN=1) and the policy returns PASS — no false positives on
+	 * legitimate retransmits.
 	 */
+	u8_t good_map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
 	puts("\nCVE-2020-10060/10061: NESN/SN anchor attack (DC PDU, LL RX)");
 	{
-		/* Fresh connection (CONNECT_IND already established above
-		 * via the lll_interval test).  First DC PDU is the anchor. */
-		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
-		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
-
-		struct node_rx_hdr *rx =
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0);
-		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
-		ASSERT_VERDICT("benign: anchor PDU NESN=0 SN=0",
-			       dropped, false);
+		/* Fresh connection, benign anchor → policy PASSes and the
+		 * hook transitions LL_STATE from CONNECTION to STANDBY. */
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(good_map, 7, 24));
+		bool dropped = ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
+		ASSERT_VERDICT("benign: anchor PDU NESN=0 SN=0", dropped, false);
 	}
 	{
-		/* New connection: anchor flag re-armed. */
-		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
-		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
-
-		struct node_rx_hdr *rx =
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
-		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
-		ASSERT_VERDICT("malicious: anchor PDU NESN=1 SN=1",
-			       dropped, true);
-	}
-	{
-		/* Same connection: post-anchor NESN=1 SN=1 is normal
-		 * retransmission and MUST pass. */
-		struct node_rx_hdr *rx =
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
-		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		/* Same connection (LL_STATE now == STANDBY).  NESN=1 SN=1 is
+		 * normal retransmission traffic post-anchor. */
+		bool dropped = ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(1, 1));
 		ASSERT_VERDICT("benign: post-anchor NESN=1 SN=1 (legit retransmit)",
 			       dropped, false);
 	}
 	{
-		/* Reconnect: anchor armed again. */
-		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
-		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
-
-		struct node_rx_hdr *rx =
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 1, 1, 0);
-		bool dropped = ifw_ll_packet_parser_rx(NULL, rx);
+		/* Fresh connection, malicious anchor — re-arms LL_STATE to
+		 * CONNECTION_STATE so the policy fires again. */
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(good_map, 7, 24));
+		bool dropped = ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(1, 1));
+		ASSERT_VERDICT("malicious: anchor PDU NESN=1 SN=1", dropped, true);
+	}
+	{
+		/* Reconnect after the rejection: another fresh CONNECT_IND
+		 * re-arms the FSM regardless of where it was left. */
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(good_map, 7, 24));
+		bool dropped = ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(1, 1));
 		ASSERT_VERDICT("malicious: anchor of 2nd connection NESN=1 SN=1",
+			       dropped, true);
+	}
+
+	/* ----- CVE-2021-3432 (post-connection): zero interval via LL_CONN_UPDATE_IND -----
+	 *
+	 * Same vulnerability as the CONNECT_IND check (zero interval crashes
+	 * the LL scheduler) but reachable mid-session.  The same lll_interval
+	 * policy now fires from the LL_CONN_UPDATE_IND case in ifw_ctrl_rx. */
+	puts("\nCVE-2021-3432 (post-connection): zero interval via LL_CONN_UPDATE_IND");
+	{
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(good_map, 7, 24));
+		ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
+
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_conn_update_ind_rx(40));
+		ASSERT_VERDICT("benign: CONN_UPDATE_IND interval=40",
+			       dropped, false);
+	}
+	{
+		bool dropped = ifw_ll_packet_parser_rx(NULL,
+			build_conn_update_ind_rx(0));
+		ASSERT_VERDICT("malicious: CONN_UPDATE_IND interval=0",
 			       dropped, true);
 	}
 
@@ -242,12 +270,8 @@ int main(void)
 	 * runs and the device crashes when the instant arrives. */
 	puts("\nCVE-2020-10069 (post-connection): malicious LL_CHANNEL_MAP_IND");
 	{
-		u8_t good_map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
-		ifw_ll_packet_parser_rx(NULL,
-			build_connect_ind_rx(good_map, 7, 24));
-		/* Pass the anchor PDU so we land in steady-state. */
-		ifw_ll_packet_parser_rx(NULL,
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(good_map, 7, 24));
+		ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
 
 		u8_t benign_update[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
 		bool dropped = ifw_ll_packet_parser_rx(NULL,
@@ -276,8 +300,7 @@ int main(void)
 		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
 		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
 		/* Skip past the anchor check with a benign anchor PDU. */
-		ifw_ll_packet_parser_rx(NULL,
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+		ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
 
 		struct node_rx_hdr *rx = build_dc_pdu_rx(
 			PDU_DATA_LLID_CTRL, 0, 0,
@@ -300,8 +323,7 @@ int main(void)
 		 * after another reconnect to confirm reset works. */
 		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
 		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
-		ifw_ll_packet_parser_rx(NULL,
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+		ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
 
 		struct node_rx_hdr *rx = build_dc_pdu_rx(
 			PDU_DATA_LLID_CTRL, 0, 0,
@@ -316,8 +338,7 @@ int main(void)
 	{
 		u8_t map[5] = {0xff, 0xff, 0xff, 0xff, 0x1f};
 		ifw_ll_packet_parser_rx(NULL, build_connect_ind_rx(map, 7, 24));
-		ifw_ll_packet_parser_rx(NULL,
-			build_dc_pdu_rx(PDU_DATA_LLID_DATA_START, 0, 0, 0));
+		ifw_ll_packet_parser_rx(NULL, build_data_pdu_rx(0, 0));
 
 		struct node_rx_hdr *rx = build_dc_pdu_rx(
 			PDU_DATA_LLID_CTRL, 0, 0,
